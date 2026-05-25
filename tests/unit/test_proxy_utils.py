@@ -15059,7 +15059,6 @@ async def test_http_bridge_session_events_keepalive_backstop(monkeypatch):
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.sse_keepalive_interval_seconds = 0.01
-    settings.stream_idle_timeout_seconds = 0.02
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_backstop",
         model="gpt-5.1",
@@ -15120,12 +15119,76 @@ async def test_http_bridge_session_events_keepalive_backstop(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_http_bridge_session_events_keepalive_backstop_respects_idle_timeout(monkeypatch):
+    request_logs = _RequestLogsRecorder()
+    service = proxy_service.ProxyService(_repo_factory(request_logs))
+    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
+    settings.sse_keepalive_interval_seconds = 0.01
+    settings.stream_idle_timeout_seconds = 0.05
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_bridge_backstop_idle_timeout",
+        model="gpt-5.1",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        response_id=None,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+        transport="http",
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(),
+        request_model="gpt-5.1",
+        account=_make_account("acc_bridge_backstop_idle_timeout"),
+        upstream=AsyncMock(),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque([request_state]),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=30.0,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
+    monkeypatch.setattr(proxy_service, "_HTTP_BRIDGE_STARTUP_KEEPALIVE_GRACE_SECONDS", 0.01)
+    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 2)
+    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
+    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
+
+    events = service._stream_http_bridge_session_events(
+        session,
+        request_state=request_state,
+        text_data='{"type":"response.create"}',
+        queue_limit=10,
+        propagate_http_errors=False,
+        downstream_turn_state=None,
+    )
+    collected: list[str] = []
+    try:
+        async for event in events:
+            collected.append(event)
+            if len(collected) >= 10:
+                break
+    finally:
+        await events.aclose()
+
+    assert len(collected) == 6
+    assert collected[:5] == [proxy_service.CODEX_KEEPALIVE_FRAME] * 5
+    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[5]))
+    assert last["type"] == "response.failed"
+    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
+
+
+@pytest.mark.asyncio
 async def test_http_bridge_session_events_keepalive_backstop_with_response_id(monkeypatch):
     request_logs = _RequestLogsRecorder()
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.sse_keepalive_interval_seconds = 0.01
-    settings.stream_idle_timeout_seconds = 0.02
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_backstop_codex",
         model="gpt-5.1",
@@ -15197,7 +15260,6 @@ async def test_http_bridge_session_events_keepalive_backstop_uses_replay_downstr
     service = proxy_service.ProxyService(_repo_factory(request_logs))
     settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
     settings.sse_keepalive_interval_seconds = 0.01
-    settings.stream_idle_timeout_seconds = 0.02
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_bridge_replay_backstop",
         model="gpt-5.1",
@@ -15657,89 +15719,6 @@ async def test_retry_http_bridge_precreated_request_preserves_reconnect_timeout_
 
 
 @pytest.mark.asyncio
-async def test_http_bridge_session_events_uses_stream_idle_timeout_not_just_keepalive_count(monkeypatch):
-    """The downstream event loop must respect stream_idle_timeout_seconds rather
-    than firing stream_idle_timeout after just _STREAM_KEEPALIVE_MAX_COUNT
-    keepalives.  This matters for slow-starting upstreams (e.g. image_url inputs
-    where the first event may take 60-90s).
-    """
-    request_logs = _RequestLogsRecorder()
-    service = proxy_service.ProxyService(_repo_factory(request_logs))
-    settings = _make_proxy_settings(log_proxy_service_tier_trace=False)
-    settings.sse_keepalive_interval_seconds = 0.01
-    # Simulate a generous idle timeout (much larger than keepalive_count * interval)
-    settings.stream_idle_timeout_seconds = 0.2
-    request_state = proxy_service._WebSocketRequestState(
-        request_id="req_bridge_idle_timeout_respected",
-        model="gpt-5.1",
-        service_tier=None,
-        reasoning_effort=None,
-        api_key_reservation=None,
-        started_at=0.0,
-        response_id="resp_bridge_idle_timeout_respected",
-        event_queue=asyncio.Queue(),
-        request_text='{"type":"response.create"}',
-        transport="http",
-    )
-    session = proxy_service._HTTPBridgeSession(
-        key=proxy_service._HTTPBridgeSessionKey("prompt_cache", "bridge-key", None),
-        headers={},
-        affinity=proxy_service._AffinityPolicy(),
-        request_model="gpt-5.1",
-        account=_make_account("acc_bridge_idle_timeout"),
-        upstream=AsyncMock(),
-        upstream_control=proxy_service._WebSocketUpstreamControl(),
-        pending_requests=deque([request_state]),
-        pending_lock=anyio.Lock(),
-        response_create_gate=asyncio.Semaphore(1),
-        queued_request_count=1,
-        last_used_at=0.0,
-        idle_ttl_seconds=30.0,
-    )
-
-    monkeypatch.setattr(proxy_service, "get_settings", lambda: settings)
-    # Set _STREAM_KEEPALIVE_MAX_COUNT low (2) so under the OLD code,
-    # stream would terminate after 3 keepalives (count > 2).
-    # With the fix, the effective max should be derived from
-    # stream_idle_timeout_seconds / keepalive_interval = 0.2 / 0.01 = 20.
-    monkeypatch.setattr(proxy_service, "_STREAM_KEEPALIVE_MAX_COUNT", 2)
-    monkeypatch.setattr(service, "_submit_http_bridge_request", AsyncMock())
-    monkeypatch.setattr(service, "_detach_http_bridge_request", AsyncMock())
-
-    events = service._stream_http_bridge_session_events(
-        session,
-        request_state=request_state,
-        text_data='{"type":"response.create"}',
-        queue_limit=10,
-        propagate_http_errors=False,
-        downstream_turn_state=None,
-    )
-    collected: list[str] = []
-    try:
-        async for event in events:
-            collected.append(event)
-            if len(collected) >= 30:
-                break
-    finally:
-        await events.aclose()
-
-    # Under the old code with _STREAM_KEEPALIVE_MAX_COUNT=2, we'd get only
-    # 3 events (2 keepalives + stream_idle_timeout).
-    # Under the fix, with stream_idle_timeout_seconds=0.2 and interval=0.01,
-    # effective_max = max(2, int(0.2/0.01)) = 20, so we should get
-    # 20 keepalives + stream_idle_timeout = 21 events.
-    # Assert we get MORE than 3 events (proving the fix works).
-    assert len(collected) > 3, (
-        f"Expected more than 3 events (stream should respect stream_idle_timeout_seconds), got {len(collected)}"
-    )
-    # The last event should still be stream_idle_timeout
-    last = cast(dict[str, object], proxy_service.parse_sse_data_json(collected[-1]))
-    assert last["type"] == "response.failed"
-    assert cast(dict[str, object], last["response"])["status"] == "failed"
-    assert cast(dict[str, object], cast(dict[str, object], last["response"])["error"])["code"] == "stream_idle_timeout"
-
-
-@pytest.mark.asyncio
 async def test_pop_replayable_precreated_request_suppresses_replay_after_response_event():
     request_state = proxy_service._WebSocketRequestState(
         request_id="req_precreated_visible",
@@ -15761,3 +15740,574 @@ async def test_pop_replayable_precreated_request_suppresses_replay_after_respons
 
     assert replayed is None
     assert pending_requests == deque([request_state])
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_converts_external_urls(monkeypatch):
+    """HTTP bridge must inline external image URLs to data: URLs just like the
+    HTTP direct path does.  Without this, the upstream WS silently rejects the
+    request and the client sees a hang / stream_idle_timeout."""
+
+    data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+    inlined_payloads: list[dict] = []
+
+    async def fake_inline(payload_dict, _session, _timeout):
+        inlined_payloads.append(payload_dict)
+        # Simulate converting the http URL to a data URL
+        d = dict(payload_dict)
+        inp = list(d["input"])
+        item = dict(inp[0])
+        content = list(item["content"])
+        img_part = dict(content[1])
+        img_part["image_url"] = data_url
+        content[1] = img_part
+        item["content"] = content
+        inp[0] = item
+        d["input"] = inp
+        return d
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe this"},
+                    {"type": "input_image", "image_url": "https://example.com/photo.png"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_1",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    result = await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert len(inlined_payloads) == 1
+    result_dict = json.loads(result)
+    assert result_dict["input"][0]["content"][1]["image_url"] == data_url
+    # request_state.request_text must also be updated for replay safety
+    assert request_state.request_text == result
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_rechecks_expanded_payload_size(monkeypatch):
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "https://example.com/photo.png"},
+                ],
+            }
+        ],
+    }
+    expanded_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64," + ("A" * 256)},
+                ],
+            }
+        ],
+    }
+
+    async def fake_inline(payload_dict, _session, _timeout):
+        assert payload_dict == original_payload
+        return expanded_payload
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_size",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+    monkeypatch.setattr(proxy_service, "_UPSTREAM_RESPONSE_CREATE_WARN_BYTES", 1)
+    monkeypatch.setattr(
+        proxy_service,
+        "_UPSTREAM_RESPONSE_CREATE_MAX_BYTES",
+        len(text_data.encode("utf-8")) + 32,
+    )
+    monkeypatch.setattr(proxy_service, "_write_response_create_dump", lambda *args, **kwargs: None)
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert exc_info.value.status_code == 413
+    assert exc_info.value.failure_phase == "validation"
+    assert request_state.request_text is not None
+    assert "data:image/png;base64," in request_state.request_text
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_reinlines_final_text(monkeypatch):
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    original_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.5",
+            "input": [{"content": [{"type": "input_image", "image_url": "https://example.com/a.png"}]}],
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    inlined_text = json.dumps(
+        {
+            "type": "response.create",
+            "model": "gpt-5.5",
+            "input": [{"content": [{"type": "input_image", "image_url": "data:image/png;base64,abc"}]}],
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_submit_inline",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text=original_text,
+    )
+    send_text = AsyncMock()
+    upstream = cast(proxy_service.UpstreamResponsesWebSocket, SimpleNamespace(send_text=send_text, close=AsyncMock()))
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-submit-inline", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-submit-inline"),
+        request_model="gpt-5.5",
+        account=cast(Account, SimpleNamespace(id="acc-submit-inline")),
+        upstream=upstream,
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=0,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    inline = AsyncMock(return_value=inlined_text)
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
+    monkeypatch.setattr(service, "_maybe_prewarm_http_bridge_session", AsyncMock())
+    monkeypatch.setattr(service, "_acquire_request_state_response_create_admission", AsyncMock())
+    monkeypatch.setattr(service, "_start_request_state_api_key_reservation_heartbeat", lambda *args, **kwargs: None)
+
+    await service._submit_http_bridge_request(
+        session,
+        request_state=request_state,
+        text_data=original_text,
+        queue_limit=1,
+    )
+
+    inline.assert_awaited_once_with(original_text, request_state)
+    send_text.assert_awaited_once_with(inlined_text)
+    assert list(session.pending_requests) == [request_state]
+
+
+@pytest.mark.asyncio
+async def test_submit_http_bridge_request_checks_queue_before_inlining(monkeypatch):
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_submit_queue_full_inline",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        event_queue=asyncio.Queue(),
+        request_text='{"type":"response.create"}',
+    )
+    session = proxy_service._HTTPBridgeSession(
+        key=proxy_service._HTTPBridgeSessionKey("session_header", "sid-submit-queue-full", None),
+        headers={},
+        affinity=proxy_service._AffinityPolicy(key="sid-submit-queue-full"),
+        request_model="gpt-5.5",
+        account=cast(Account, SimpleNamespace(id="acc-submit-queue-full")),
+        upstream=cast(
+            proxy_service.UpstreamResponsesWebSocket,
+            SimpleNamespace(send_text=AsyncMock(), close=AsyncMock()),
+        ),
+        upstream_control=proxy_service._WebSocketUpstreamControl(),
+        pending_requests=deque(),
+        pending_lock=anyio.Lock(),
+        response_create_gate=asyncio.Semaphore(1),
+        queued_request_count=1,
+        last_used_at=0.0,
+        idle_ttl_seconds=120.0,
+    )
+
+    inline = AsyncMock(side_effect=AssertionError("queue-full requests must not fetch images"))
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
+
+    with pytest.raises(proxy_module.ProxyResponseError) as exc_info:
+        await service._submit_http_bridge_request(
+            session,
+            request_state=request_state,
+            text_data='{"type":"response.create"}',
+            queue_limit=1,
+        )
+
+    assert exc_info.value.status_code == 429
+    inline.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_http_bridge_owner_forward_defers_image_inlining(monkeypatch):
+    service = proxy_service.ProxyService(_repo_factory(_RequestLogsRecorder()))
+    original_url = "https://example.com/forwarded.png"
+    payload = ResponsesRequest.model_validate(
+        {
+            "model": "gpt-5.5",
+            "instructions": "describe the image",
+            "input": [{"content": [{"type": "input_image", "image_url": original_url}]}],
+            "stream": True,
+        }
+    )
+    owner_key = proxy_service._HTTPBridgeSessionKey("session_header", "sid-forward-inline", None)
+    owner_forward = proxy_service._HTTPBridgeOwnerForward(
+        owner_instance="owner-instance",
+        owner_endpoint="http://owner.local",
+        key=owner_key,
+    )
+    forwarded_payloads: list[ResponsesRequest] = []
+
+    class OwnerClient:
+        async def stream_responses(self, **kwargs):
+            forwarded_payloads.append(kwargs["payload"])
+            yield 'data: {"type":"response.completed","response":{"id":"resp_forward","status":"completed"}}\n\n'
+
+    inline = AsyncMock(side_effect=AssertionError("non-owner must not inline before forwarding"))
+    monkeypatch.setattr(service, "_inline_http_bridge_image_urls", inline)
+    monkeypatch.setattr(service, "_http_bridge_owner_client", OwnerClient())
+    monkeypatch.setattr(service, "_get_or_create_http_bridge_session", AsyncMock(return_value=owner_forward))
+    monkeypatch.setattr(service, "_resolve_file_account_for_responses", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        proxy_service,
+        "_http_bridge_runtime_config",
+        lambda _dashboard_settings, _app_settings: proxy_service._HTTPBridgeRuntimeConfig(
+            enabled=True,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=120.0,
+            max_sessions=4,
+            queue_limit=4,
+            prompt_cache_idle_ttl_seconds=120.0,
+            gateway_safe_mode=False,
+        ),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in service._stream_via_http_bridge(
+            payload,
+            {"x-codex-session-id": "sid-forward-inline"},
+            codex_session_affinity=True,
+            propagate_http_errors=False,
+            openai_cache_affinity=False,
+            api_key=None,
+            api_key_reservation=None,
+            suppress_text_done_events=False,
+            idle_ttl_seconds=120.0,
+            codex_idle_ttl_seconds=120.0,
+            max_sessions=4,
+            queue_limit=4,
+        )
+    ]
+
+    assert chunks == ['data: {"type":"response.completed","response":{"id":"resp_forward","status":"completed"}}\n\n']
+    inline.assert_not_awaited()
+    assert forwarded_payloads
+    forwarded = forwarded_payloads[0].model_dump(mode="json", exclude_none=True)
+    assert forwarded["input"][0]["content"][0]["image_url"] == original_url
+
+
+def test_count_external_image_urls_handles_object_content() -> None:
+    payload: dict[str, JsonValue] = {
+        "input": [
+            {
+                "role": "user",
+                "content": {"type": "input_image", "image_url": "https://example.com/photo.png"},
+            }
+        ],
+    }
+
+    assert proxy_service._count_external_image_urls(payload) == 1
+
+
+def test_count_external_image_urls_handles_top_level_input_image() -> None:
+    payload: dict[str, JsonValue] = {
+        "input": [
+            {
+                "type": "input_image",
+                "image_url": "https://example.com/photo.png",
+            }
+        ],
+    }
+
+    assert proxy_service._count_external_image_urls(payload) == 1
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_converts_top_level_input_image(monkeypatch):
+    data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg=="
+
+    async def fake_inline_nested(payload_dict, _session, _timeout):
+        return dict(payload_dict)
+
+    async def fake_inline_content(content, _session, _timeout):
+        assert content == {"type": "input_image", "image_url": "https://example.com/top.png"}
+        return {"type": "input_image", "image_url": data_url}, True
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline_nested)
+    monkeypatch.setattr(proxy_service, "_inline_content_images", fake_inline_content)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [{"type": "input_image", "image_url": "https://example.com/top.png"}],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_top_level",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    result = await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    result_dict = json.loads(result)
+    assert result_dict["input"][0]["image_url"] == data_url
+    assert request_state.request_text == result
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_skips_when_disabled(monkeypatch):
+    """When image_inline_fetch_enabled is False, no inlining should happen."""
+
+    class FakeSettings:
+        image_inline_fetch_enabled = False
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "https://example.com/photo.png"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_2",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    result = await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert result == text_data
+    assert request_state.request_text == text_data
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_skips_data_urls(monkeypatch):
+    """Payloads that already use data: URLs should pass through unchanged."""
+
+    inlined_payloads: list[dict] = []
+
+    async def fake_inline(payload_dict, _session, _timeout):
+        inlined_payloads.append(payload_dict)
+        return dict(payload_dict)
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_image", "image_url": "data:image/png;base64,abc123"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_3",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    result = await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert len(inlined_payloads) == 1
+    assert result == text_data
+
+
+@pytest.mark.asyncio
+async def test_inline_http_bridge_image_urls_rejects_when_fetch_fails(monkeypatch):
+    """When inlining fails (fetch returns None / URL survives), the method
+    must raise a 400 error immediately rather than letting upstream hang."""
+    from app.core.clients.proxy import ProxyResponseError
+
+    async def fake_inline_noop(payload_dict, _session, _timeout):
+        # Simulate fetch failure: return unchanged payload
+        return dict(payload_dict)
+
+    class FakeSettings:
+        image_inline_fetch_enabled = True
+        upstream_connect_timeout_seconds = 5.0
+
+    class FakeSession:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            pass
+
+    monkeypatch.setattr(proxy_service, "get_settings", lambda: FakeSettings())
+    monkeypatch.setattr(proxy_service, "_inline_input_image_urls", fake_inline_noop)
+    monkeypatch.setattr(proxy_service, "lease_http_session", lambda: FakeSession())
+    monkeypatch.setattr(proxy_service, "_as_image_fetch_session", lambda s: s)
+
+    original_payload = {
+        "type": "response.create",
+        "model": "gpt-5.5",
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "describe this"},
+                    {"type": "input_image", "image_url": "https://example.com/photo.png"},
+                ],
+            }
+        ],
+    }
+    text_data = json.dumps(original_payload, ensure_ascii=True, separators=(",", ":"))
+    request_state = proxy_service._WebSocketRequestState(
+        request_id="req_img_fail",
+        model="gpt-5.5",
+        service_tier=None,
+        reasoning_effort=None,
+        api_key_reservation=None,
+        started_at=0.0,
+        awaiting_response_created=True,
+        request_text=text_data,
+    )
+
+    service = proxy_service.ProxyService.__new__(proxy_service.ProxyService)
+    with pytest.raises(ProxyResponseError) as exc_info:
+        await service._inline_http_bridge_image_urls(text_data, request_state)
+
+    assert exc_info.value.status_code == 400
+    assert "image_download_failed" in json.dumps(exc_info.value.payload)
