@@ -25,6 +25,7 @@ from app.modules.api_keys.service import ApiKeyData, ApiKeyUsageReservationData
 from app.modules.proxy._service.observability import (
     _maybe_log_proxy_request_shape,
     _record_continuity_fail_closed,
+    _record_upstream_transport_decision,
 )
 from app.modules.proxy._service.streaming.protocol import _StreamingServiceProtocol
 from app.modules.proxy._service.support import (
@@ -140,6 +141,8 @@ class _StreamingRetryMixin:
             request_transport=request_transport,
         )
         prefer_earlier_reset = settings.prefer_earlier_reset_accounts
+        upstream_transport_policy_label = "explicit" if upstream_stream_transport_override is not None else "configured"
+        upstream_transport_sticky = _http_downstream_request_is_sticky(payload, headers)
         upstream_stream_transport = upstream_stream_transport_override
         if upstream_stream_transport is None:
             configured_transport, explicit_transport = _resolved_configured_stream_transport(settings, base_settings)
@@ -164,7 +167,8 @@ class _StreamingRetryMixin:
                 and upstream_stream_transport == "websocket"
             ):
                 policy, override_applied = _effective_http_downstream_transport_policy(api_key, settings, base_settings)
-                sticky = _http_downstream_request_is_sticky(payload, headers)
+                sticky = upstream_transport_sticky
+                upstream_transport_policy_label = policy
                 policy_transport = _resolve_http_downstream_transport(policy, payload=payload, headers=headers)
                 upstream_stream_transport = "http" if policy_transport == "http" else configured_transport
                 logger.info(
@@ -215,6 +219,8 @@ class _StreamingRetryMixin:
         max_attempts = _facade()._STREAM_MAX_ACCOUNT_ATTEMPTS
         settled = False
         any_attempt_logged = False
+        upstream_transport_metric_status: str | None = None
+        upstream_transport_metric_recorded = False
         settlement = _StreamSettlement()
         last_transient_exc: ProxyResponseError | None = None
         last_security_work_retry_error: _RetryableStreamError | None = None
@@ -237,6 +243,19 @@ class _StreamingRetryMixin:
             except ValueError:
                 pass
             await proxy._load_balancer.release_account_lease(lease)
+
+        def _record_upstream_transport_metric_once(status: str) -> None:
+            nonlocal upstream_transport_metric_recorded
+            if upstream_transport_metric_recorded:
+                return
+            upstream_transport_metric_recorded = True
+            _record_upstream_transport_decision(
+                downstream_transport=request_transport,
+                upstream_transport=upstream_stream_transport,
+                policy=upstream_transport_policy_label,
+                sticky=upstream_transport_sticky,
+                status=status,
+            )
 
         try:
             if payload.previous_response_id is not None:
@@ -284,6 +303,7 @@ class _StreamingRetryMixin:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
@@ -326,6 +346,7 @@ class _StreamingRetryMixin:
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         service_tier=payload.service_tier,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         useragent=useragent,
                         useragent_group=useragent_group,
                     )
@@ -369,6 +390,7 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                             )
@@ -487,6 +509,7 @@ class _StreamingRetryMixin:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
@@ -517,6 +540,7 @@ class _StreamingRetryMixin:
                             error_message=error_message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
@@ -545,6 +569,7 @@ class _StreamingRetryMixin:
                             error_message=message,
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             service_tier=payload.service_tier,
                             requested_service_tier=payload.service_tier,
                             useragent=useragent,
@@ -570,6 +595,7 @@ class _StreamingRetryMixin:
                         error_message=no_accounts_msg,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
@@ -608,6 +634,7 @@ class _StreamingRetryMixin:
                         error_message=message,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
@@ -635,6 +662,7 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
                         )
@@ -655,6 +683,7 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             upstream_proxy_fail_closed_reason=exc.reason,
                             useragent=useragent,
                             useragent_group=useragent_group,
@@ -704,6 +733,7 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
                         )
@@ -737,6 +767,7 @@ class _StreamingRetryMixin:
                             reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                             service_tier=payload.service_tier,
                             transport=request_transport,
+                            upstream_transport=upstream_stream_transport,
                             useragent=useragent,
                             useragent_group=useragent_group,
                         )
@@ -968,6 +999,8 @@ class _StreamingRetryMixin:
                             settlement,
                             request_id,
                         )
+                        upstream_transport_metric_status = settlement.status
+                        _record_upstream_transport_metric_once(settlement.status)
                         return
                     continue  # outer loop: account failover after transient exhaustion
                 except _RetryableStreamError as exc:
@@ -1038,6 +1071,7 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                             )
@@ -1091,6 +1125,7 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                             )
@@ -1122,6 +1157,7 @@ class _StreamingRetryMixin:
                                 reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                                 service_tier=payload.service_tier,
                                 transport=request_transport,
+                                upstream_transport=upstream_stream_transport,
                                 useragent=useragent,
                                 useragent_group=useragent_group,
                             )
@@ -1267,6 +1303,8 @@ class _StreamingRetryMixin:
                             settlement,
                             request_id,
                         )
+                        upstream_transport_metric_status = settlement.status
+                        _record_upstream_transport_metric_once(settlement.status)
                         return
                     error = _parse_openai_error(exc.payload)
                     error_code = _normalize_error_code(error.code if error else None, error.type if error else None)
@@ -1359,6 +1397,7 @@ class _StreamingRetryMixin:
                         error_message=retries_exhausted_msg,
                         reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                         transport=request_transport,
+                        upstream_transport=upstream_stream_transport,
                         service_tier=payload.service_tier,
                         requested_service_tier=payload.service_tier,
                         useragent=useragent,
@@ -1395,12 +1434,15 @@ class _StreamingRetryMixin:
                     error_message=retries_exhausted_msg,
                     reasoning_effort=payload.reasoning.effort if payload.reasoning else None,
                     transport=request_transport,
+                    upstream_transport=upstream_stream_transport,
                     service_tier=payload.service_tier,
                     requested_service_tier=payload.service_tier,
                     useragent=useragent,
                     useragent_group=useragent_group,
                 )
         finally:
+            if not upstream_transport_metric_recorded:
+                _record_upstream_transport_metric_once(upstream_transport_metric_status or "error")
             for account_lease in account_leases:
                 await proxy._load_balancer.release_account_lease(account_lease)
             if not settled and api_key is not None and api_key_reservation is not None:
