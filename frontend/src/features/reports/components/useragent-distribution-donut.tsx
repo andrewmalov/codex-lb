@@ -1,26 +1,33 @@
 import { useEffect, useRef, useState } from "react";
 import { Cell, Pie, PieChart, ResponsiveContainer, Sector, type PieSectorShapeProps } from "@/components/lazy-recharts";
-import type { ModelCostEntry } from "../schemas";
+import type { UseragentCostEntry } from "../schemas";
 import { DistributionMetricToggle, type DistributionMetric } from "./distribution-metric-toggle";
 import { formatDistributionMetricValue } from "./distribution-metric-format";
 
-export type ModelDistributionDonutProps = {
-  data: ModelCostEntry[];
+export type UseragentDistributionDonutProps = {
+  data: UseragentCostEntry[];
 };
 
 const COLORS = ["#3b82f6", "#10b981", "#f59e0b", "#ec4899", "#8b5cf6", "#06b6d4"];
+const UNKNOWN_COLOR = "#9ca3af";
+const MISSING_USERAGENT_LABEL = "Missing User-Agent";
 const ACTIVE_RADIUS_OFFSET = 4;
 const LEGEND_VISIBLE_COUNT = 4;
 const LEGEND_ROW_HEIGHT_REM = 2;
 
-type ChartDatum = ModelCostEntry & {
+type ChartDatum = UseragentCostEntry & {
   id: string;
   fill: string;
   metricLabel: string;
+  metricValue: number;
   metricPercentage: number;
 };
 
-export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
+function getUseragentColor(useragent: string, index: number) {
+  return useragent === MISSING_USERAGENT_LABEL ? UNKNOWN_COLOR : COLORS[index % COLORS.length];
+}
+
+export function UseragentDistributionDonut({ data }: UseragentDistributionDonutProps) {
   const [metric, setMetric] = useState<DistributionMetric>("cost");
   const [activeLegendId, setActiveLegendId] = useState<string | null>(null);
   const legendRefs = useRef<Record<string, HTMLButtonElement | null>>({});
@@ -33,12 +40,13 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   );
   const chartData: ChartDatum[] = data.map((entry, index) => ({
     ...entry,
-    id: entry.model,
-    fill: COLORS[index % COLORS.length],
+    id: `${entry.useragent}-${index}`,
+    fill: getUseragentColor(entry.useragent, index),
     metricLabel: formatDistributionMetricValue(
       isCostMetric ? entry.costUsd : entry.requests,
       metric,
     ),
+    metricValue: isCostMetric ? entry.costUsd : entry.requests,
     metricPercentage: isCostMetric
       ? entry.percentage
       : totalRequests > 0
@@ -79,7 +87,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
   return (
     <div className="rounded-xl border bg-card p-5">
       <div className="flex items-start justify-between gap-3">
-        <div className="text-sm font-semibold text-foreground">Distribution by Model</div>
+        <div className="text-sm font-semibold text-foreground">Distribution by UserAgent</div>
         <DistributionMetricToggle metric={metric} onChange={setMetric} />
       </div>
       <div className="mt-4 flex items-center gap-4">
@@ -87,13 +95,13 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
           <div className="pointer-events-none absolute inset-0 z-10 flex flex-col items-center justify-center text-center">
             <span
               className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground"
-              data-testid="model-distribution-center-label"
+              data-testid="useragent-distribution-center-label"
             >
               Total
             </span>
             <span
               className="max-w-[76px] text-sm font-semibold leading-tight tabular-nums text-foreground"
-              data-testid="model-distribution-center-value"
+              data-testid="useragent-distribution-center-value"
             >
               {totalMetricLabel}
             </span>
@@ -103,7 +111,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
               <Pie
                 data={chartData}
                 dataKey={isCostMetric ? "costUsd" : "requests"}
-                nameKey="model"
+                nameKey="useragent"
                 cx="50%"
                 cy="50%"
                 innerRadius={45}
@@ -122,7 +130,7 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
         </div>
         <div
           className="flex-1 overflow-y-auto text-xs [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-          data-testid="model-distribution-legend-list"
+          data-testid="useragent-distribution-legend-list"
           style={{ maxHeight: `calc(${LEGEND_VISIBLE_COUNT} * ${LEGEND_ROW_HEIGHT_REM}rem)` }}
         >
           {chartData.map((entry, i) => (
@@ -139,14 +147,14 @@ export function ModelDistributionDonut({ data }: ModelDistributionDonutProps) {
               onFocus={() => setActiveLegendId(entry.id)}
               onBlur={() => setActiveLegendId(null)}
               data-active={activeLegendId === entry.id ? "true" : "false"}
-              data-testid={`model-distribution-legend-${i}`}
+              data-testid={`useragent-distribution-legend-${i}`}
             >
               <div className="flex items-center gap-2">
                 <span
                   className="h-2.5 w-2.5 shrink-0 rounded-[3px]"
                   style={{ background: entry.fill }}
                 />
-                <span className="text-foreground">{entry.model}</span>
+                <span className="text-foreground">{entry.useragent}</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="tabular-nums text-muted-foreground">{entry.metricPercentage.toFixed(1)}%</span>
