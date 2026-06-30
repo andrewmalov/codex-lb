@@ -160,7 +160,7 @@ export const RequestLogSchema = z.object({
   apiKeyId: z.string().nullable().optional().default(null),
   requestId: z.string(),
   archiveRequestId: z.string().nullable().optional(),
-  requestKind: z.enum(["normal", "warmup", "limit_warmup"]).optional().default("normal"),
+  requestKind: z.enum(["normal", "warmup", "limit_warmup", "prewarm", "compaction"]).optional().default("normal"),
   model: z.string(),
   source: z.string().nullable().optional().default(null),
   transport: z.string().nullable().optional().default(null),
