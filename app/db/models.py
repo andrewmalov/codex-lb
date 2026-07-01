@@ -69,6 +69,13 @@ class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         CheckConstraint("provider IN ('codex', 'claude')", name="ck_accounts_provider"),
+        Index(
+            "uq_accounts_claude_uuid",
+            "claude_account_uuid",
+            unique=True,
+            sqlite_where=text("provider = 'claude'"),
+            postgresql_where=text("provider = 'claude'"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -78,7 +85,7 @@ class Account(Base):
         default=new_codex_installation_id,
         nullable=False,
     )
-    email: Mapped[str] = mapped_column(String, nullable=False)
+    email: Mapped[str | None] = mapped_column(String, nullable=True)
     provider: Mapped[str] = mapped_column(
         Text,
         nullable=False,
@@ -102,6 +109,32 @@ class Account(Base):
 
     last_refresh: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    # Claude OAuth pool columns — see openspec/changes/add-claude-oauth-pool/specs/claude-oauth-pool/spec.md
+    claude_account_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claude_refresh_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    claude_access_token_encrypted: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    claude_access_token_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    claude_scopes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claude_user_email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    claude_user_organization_uuid: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Anthropic rate-limit cache — see openspec/changes/add-claude-oauth-pool/specs/claude-oauth-pool/spec.md
+    rate_limit_requests_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_requests_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rate_limit_input_tokens_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_input_tokens_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rate_limit_output_tokens_remaining: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    rate_limit_output_tokens_reset_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    rate_limit_status: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     status: Mapped[AccountStatus] = mapped_column(
         SqlEnum(
