@@ -7,6 +7,7 @@ from enum import Enum
 from sqlalchemy import (
     BigInteger,
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -66,6 +67,9 @@ class RequestKind(str, Enum):
 
 class Account(Base):
     __tablename__ = "accounts"
+    __table_args__ = (
+        CheckConstraint("provider IN ('codex', 'claude')", name="ck_accounts_provider"),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     chatgpt_account_id: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -75,6 +79,11 @@ class Account(Base):
         nullable=False,
     )
     email: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'codex'"),
+    )
     alias: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_id: Mapped[str | None] = mapped_column(String, nullable=True)
     workspace_label: Mapped[str | None] = mapped_column(String, nullable=True)
