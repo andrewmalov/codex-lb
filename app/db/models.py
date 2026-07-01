@@ -69,12 +69,24 @@ class Account(Base):
     __tablename__ = "accounts"
     __table_args__ = (
         CheckConstraint("provider IN ('codex', 'claude')", name="ck_accounts_provider"),
+        CheckConstraint(
+            "((provider = 'claude') AND (claude_refresh_token_encrypted IS NOT NULL)) "
+            "OR ((provider != 'claude') AND (claude_refresh_token_encrypted IS NULL))",
+            name="ck_accounts_claude_rt_required",
+        ),
         Index(
             "uq_accounts_claude_uuid",
             "claude_account_uuid",
             unique=True,
             sqlite_where=text("provider = 'claude'"),
             postgresql_where=text("provider = 'claude'"),
+        ),
+        Index(
+            "uq_accounts_codex_email",
+            "email",
+            unique=True,
+            sqlite_where=text("provider = 'codex'"),
+            postgresql_where=text("provider = 'codex'"),
         ),
     )
 
