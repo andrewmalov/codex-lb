@@ -308,6 +308,7 @@ class LoadBalancer:
         lease_kind: AccountLeaseKind | None = None,
         estimated_lease_tokens: float = 0.0,
         traffic_class: TrafficClass = TRAFFIC_CLASS_FOREGROUND,
+        provider: str | None = None,
     ) -> AccountSelection:
         excluded_ids = set(exclude_account_ids or ())
         scoped_account_ids = None if account_ids is None else set(account_ids)
@@ -318,6 +319,7 @@ class LoadBalancer:
                 service_tier=service_tier,
                 additional_limit_name=additional_limit_name,
                 account_ids=scoped_account_ids,
+                provider=provider,
             )
             if require_security_work_authorized and selection_inputs.accounts:
                 authorized_accounts = [
@@ -779,7 +781,12 @@ class LoadBalancer:
         service_tier: str | None = None,
         additional_limit_name: str | None = None,
         account_ids: Collection[str] | None = None,
+        provider: str | None = None,
     ) -> _SelectionInputs:
+        # ``provider=None`` defaults to ``"codex"`` so existing callers keep
+        # the legacy Codex-only behavior. The effective scope is part of the
+        # cache key so provider-scoped lookups never collide.
+        effective_provider = "codex" if provider is None else provider
         effective_limit_name = additional_limit_name or _gated_limit_name_for_model(model)
         additional_quota_routing_policies: dict[str, str] = {}
         if effective_limit_name is not None:
@@ -795,6 +802,7 @@ class LoadBalancer:
             additional_limit_name,
             additional_quota_routing_policies_cache_key,
             None if account_ids is None else tuple(sorted(set(account_ids))),
+            effective_provider,
         )
         cached = await self._selection_inputs_cache.get(cache_key)
         if cached is not None:
@@ -804,6 +812,16 @@ class LoadBalancer:
 
         async with self._repo_factory() as repos:
             all_accounts = await repos.accounts.list_accounts()
+            # Provider-discriminated pool filter. Only accounts whose
+            # ``Account.provider`` matches the requested scope are eligible.
+            # This is the narrow ratchet the spec requires — all downstream
+            # eligibility, health-tier, model-plan, quota, cooldown, circuit
+            # breaker, and budget-safety gates then run on the scoped pool.
+            all_accounts = [
+                account
+                for account in all_accounts
+                if getattr(account, "provider", "codex") == effective_provider
+            ]
             quota_planner_repo = getattr(repos, "quota_planner", None)
             get_quota_planner_settings = getattr(quota_planner_repo, "get_settings", None)
             if callable(get_quota_planner_settings):
