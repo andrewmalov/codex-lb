@@ -140,10 +140,16 @@ app/core/clients/anthropic/
   - On `invalid_grant` or unrecoverable error, set `accounts.status=DEACTIVATED` (with `deactivation_reason`) and emit a structured log line.
 - Auth guardian scheduler extended with a single new pass: iterate accounts with `provider='claude'` and `claude_access_token_expires_at < now() + 600s`, calling `rotate_claude_access_token`. The existing scheduler instance, error handling, and rate-limit backoff are reused.
 - `ClaudeChatClient.send_messages(...)` and `.stream_messages(...)`:
-  - Inject auth headers (the exact header set — `Authorization: Bearer <access>`, `anthropic-version`, `anthropic-beta`, etc. — is a verification task in the implementation phase).
+  - Inject auth headers with exact values verified by Phase 0 (see `notes.md` §2):
+    - `Authorization: Bearer <access_token>` — OAuth-issued access tokens begin with `sk-ant-oat01-`. `x-api-key` MUST NOT be sent.
+    - `Content-Type: application/json` (or `text/event-stream` when streaming).
+    - `anthropic-version: 2023-06-01` — date-form version string (NOT semver). Stable across all Anthropic Messages API calls.
+    - `anthropic-beta: oauth-2025-04-20,claude-code-20250219` — comma-separated CSV of beta flags. `oauth-2025-04-20` is REQUIRED for OAuth-authenticated requests. `claude-code-20250219` is strongly recommended for Claude Code fidelity (the server validates it on Claude Code's behalf).
+    - `User-Agent: claude-code/<version>` recommended (not strictly required; reduces Cloudflare WAF false-positive risk).
   - On non-streaming response: forward body bytes after recording usage and rate-limit headers.
   - On streaming response: forward SSE bytes to the client; on stream end, parse the final `message_delta` and the response trailers / headers to extract usage and rate-limit state.
   - On `401` from upstream: call `ClaudeAuthManager.rotate_claude_access_token(account, force=True)` once and retry the request once. Second `401` propagates as `ClaudeAuthError`.
+  - **Per-account refresh serialization**: Anthropic's OAuth does NOT support multiple active refresh tokens for the same `client_id`. If the auth guardian scheduler and the request-time 401-retry path both fire for the same `account_id` simultaneously, the second refresh invalidates the first and yields `400 invalid_grant`. Both paths MUST coalesce through a singleflight lock keyed on `account_id` (e.g. `asyncio.Lock` per account, an in-process `dict[account_id, asyncio.Future]`, or equivalent). Concurrent callers waiting on the lock receive the same rotated credentials rather than racing.
 
 ### API-key authorization
 
@@ -153,7 +159,8 @@ app/core/clients/anthropic/
 ### Rate-limit handling
 
 - Anthropic rate-limit headers (list above) are written into the `accounts.rate_limit_*` columns after every request.
-- `429` responses set `accounts.status=AccountStatus.RATE_LIMITED` and `accounts.reset_at=<future unix timestamp>` and `accounts.rate_limit_status='rejected'`, matching existing Codex cooldown semantics in `app/modules/proxy/load_balancer.py`.
+- Reset values (`anthropic-ratelimit-*-reset`) are absolute **RFC 3339** timestamps (e.g. `2026-07-01T12:00:00Z`). Verified across all captures; no relative form ("in 5m") or unix seconds form has been observed in Anthropic responses. The parser SHALL accept RFC 3339 only and SHALL reject malformed values by dropping the field rather than guessing.
+- `429` responses set `accounts.status=AccountStatus.RATE_LIMITED` and `accounts.reset_at=<future unix timestamp derived from the nearest RFC 3339 reset value>` and `accounts.rate_limit_status='rejected'`, matching existing Codex cooldown semantics in `app/modules/proxy/load_balancer.py`.
 
 ### Request logs and metrics
 
@@ -203,9 +210,9 @@ i18n strings (en + zh-CN) for the new UI: tab title, button labels, error messag
 
 ## Risks / Trade-offs
 
-- **Verification blockers**: Exact Anthropic OAuth refresh endpoint URL, required header set, and refresh-token rotation behavior are not verified at design time. Implementation phase must verify these against a real Claude Code OAuth token before declaring the change ready. Without verification, the implementation could ship broken against Anthropic's actual API.
+- **Verification status (Phase 0 complete)**: Anthropic OAuth refresh endpoint URL (`https://platform.claude.com/v1/oauth/token`), required API header set (`Authorization: Bearer`, `anthropic-version: 2023-06-01`, `anthropic-beta: oauth-2025-04-20,claude-code-20250219`), and refresh-token rotation behavior (always rotate, single-use) have been verified against public sources (Anthropic docs + multiple open-source clients). See `openspec/changes/add-claude-oauth-pool/notes.md` for the full citation list.
 - **PR size**: Estimated 1100-1200 net lines (Python ~700, frontend ~300, OpenSpec ~200). Exceeds the ~800-net-lines guidance. Justification: end-to-end functionality requires the database column, account lifecycle, OAuth refresh, passthrough route, API-key authz, and minimal dashboard tab to land together for the feature to be testable. PR description must document this rationale.
-- **Refresh-token rotation unknown**: Anthropic may rotate the refresh token on each access-token refresh. If so, `claude_refresh_token_encrypted` is overwritten on every refresh. If not, the existing refresh token persists. Implementation must handle both shapes.
+- **Refresh-token rotation (verified)**: Anthropic rotates the refresh token on every successful `POST /v1/oauth/token` response. Reusing a stale refresh token yields `400 invalid_grant`. The implementation MUST unconditionally overwrite `claude_refresh_token_encrypted` with the new `refresh_token` from each refresh response. If a future Anthropic change ever stops rotating, the unconditional overwrite remains harmless (the new value equals the old one). The implementation MUST NOT preserve the previous refresh token under any branch.
 - **Anthropic upstream changes**: Anthropic controls the OAuth and API surface. A breaking change upstream can invalidate this implementation without codex-lb changing. Mitigation: monitor release notes and verify in CI against mock OAuth endpoints.
 - **Email nullable for Claude**: `accounts.email` becomes nullable because Anthropic OAuth does not always expose an email claim. The existing `UNIQUE(email)` constraint for Codex accounts remains. A partial unique index `(provider, claude_account_uuid)` covers Claude uniqueness instead.
 

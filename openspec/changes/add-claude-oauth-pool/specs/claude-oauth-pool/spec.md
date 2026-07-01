@@ -228,3 +228,101 @@ The verification findings SHALL be recorded in `openspec/changes/add-claude-oaut
 - **THEN** `openspec/changes/add-claude-oauth-pool/notes.md` exists
 - **AND** it documents each of the four verification bullets above
 - **AND** it references the sources used for verification
+
+### Requirement: Anthropic API request headers are pinned
+
+Every `POST /v1/messages` (and other Anthropic Messages API call) sent through the Claude proxy SHALL include exactly the following request headers, in addition to any per-request headers the client already supplies:
+
+- `Authorization: Bearer <access_token>` — the OAuth-issued access token (begins with `sk-ant-oat01-`). `x-api-key` SHALL NOT be sent.
+- `Content-Type: application/json` (or `text/event-stream` when streaming).
+- `anthropic-version: 2023-06-01` — a date-form version string (NOT semver), stable across the Anthropic Messages API.
+- `anthropic-beta: oauth-2025-04-20,claude-code-20250219` — a comma-separated CSV. `oauth-2025-04-20` is REQUIRED for OAuth-authenticated requests; `claude-code-20250219` is strongly recommended (server validates this header on Claude Code's behalf).
+- `User-Agent: claude-code/<version>` — recommended (not strictly required); reduces Cloudflare WAF false-positive risk.
+
+The values SHALL match `openspec/changes/add-claude-oauth-pool/notes.md` §2 exactly. If Anthropic ever changes a value, that change MUST be made in `notes.md` first and then propagated here.
+
+#### Scenario: Request to Anthropic includes pinned beta header
+
+- **GIVEN** a healthy Claude account with an OAuth access token
+- **WHEN** the proxy sends `POST /v1/messages` to Anthropic
+- **THEN** the outbound request includes `anthropic-version: 2023-06-01`
+- **AND** it includes `anthropic-beta: oauth-2025-04-20,claude-code-20250219`
+- **AND** it includes `Authorization: Bearer <access_token>`
+- **AND** it does NOT include `x-api-key`
+
+#### Scenario: Beta header set is the minimum safe set
+
+- **WHEN** the proxy constructs the outbound header set
+- **THEN** the only beta flags present in `anthropic-beta` are `oauth-2025-04-20` and `claude-code-20250219`
+- **AND** no additional beta flags are appended unless explicitly configured per the future-work policy in `notes.md`
+
+### Requirement: Rate-limit reset values are RFC 3339 only
+
+The rate-limit header parser SHALL parse values of `anthropic-ratelimit-requests-reset`, `anthropic-ratelimit-input-tokens-reset`, and `anthropic-ratelimit-output-tokens-reset` as RFC 3339 timestamps. The parser SHALL NOT accept relative form (e.g. `"in 5m"`) or bare unix seconds. A value that does not parse as RFC 3339 SHALL be dropped (the corresponding `rate_limit_*_reset_at` column remains NULL) rather than coerced.
+
+#### Scenario: RFC 3339 reset value parses to UTC datetime
+
+- **GIVEN** an upstream response with `anthropic-ratelimit-requests-reset: 2026-07-01T12:00:00Z`
+- **WHEN** the parser processes the header set
+- **THEN** `rate_limit_requests_reset_at` is a `datetime` in UTC corresponding to `2026-07-01T12:00:00Z`
+
+#### Scenario: Malformed reset value is dropped, not guessed
+
+- **GIVEN** an upstream response with `anthropic-ratelimit-requests-reset: in 5m` (relative form)
+- **WHEN** the parser processes the header set
+- **THEN** `rate_limit_requests_reset_at` is NOT set (column remains NULL)
+- **AND** the parser does NOT raise an exception
+
+#### Scenario: Reset value in `Z` suffix form is accepted
+
+- **GIVEN** an upstream response with `anthropic-ratelimit-requests-reset: 2026-07-01T12:00:00Z`
+- **WHEN** the parser processes the header set
+- **THEN** the value is parsed as RFC 3339 with the `Z` suffix translated to `+00:00` before `datetime.fromisoformat`
+
+### Requirement: Refresh-token rotation is unconditional on every successful refresh
+
+When `ClaudeOAuthClient.refresh` returns a 200 response, the system SHALL overwrite `accounts.claude_refresh_token_encrypted` with the new `refresh_token` returned by Anthropic. The previous refresh token SHALL be considered invalid and SHALL NOT be re-used. The system SHALL NOT have any branch that preserves the existing refresh token when the response includes a new one. If Anthropic ever returns a refresh response without a new `refresh_token` field (which has not been observed in verified captures), the existing refresh token SHALL be discarded (column set to NULL) and the account SHALL be flagged for re-authorization.
+
+#### Scenario: Successful refresh always persists the new refresh token
+
+- **GIVEN** a Claude account with stored refresh token `RT_OLD`
+- **WHEN** Anthropic's `POST /v1/oauth/token` returns 200 with `refresh_token: RT_NEW`
+- **THEN** `accounts.claude_refresh_token_encrypted` is updated to the encrypted form of `RT_NEW`
+- **AND** `RT_OLD` is no longer used by codex-lb
+
+#### Scenario: Stale refresh token yields invalid_grant and disables the account
+
+- **GIVEN** a Claude account whose stored refresh token was already used once
+- **WHEN** the proxy attempts to refresh using that stale token
+- **AND** Anthropic responds with `400 invalid_grant`
+- **THEN** the account's `is_active=false` and `status=DEACTIVATED`
+- **AND** a structured `claude.refresh.failed` log line is emitted
+- **AND** no further refresh attempts are made for that account until re-enabled
+
+### Requirement: Per-account refresh serialization (singleflight)
+
+The system SHALL serialize `ClaudeAuthManager.rotate_claude_access_token` calls per `account_id` using a singleflight mechanism (in-process lock keyed on `account_id`, e.g. an `asyncio.Lock` per account or a `dict[account_id, asyncio.Future]` coalescing concurrent callers). If the auth guardian scheduler and a request-time 401-retry path both fire for the same account at the same time, exactly one Anthropic `POST /v1/oauth/token` call SHALL be issued per refresh cycle, and concurrent callers SHALL receive the same rotated credentials. This applies to BOTH the auth guardian refresh path AND the request-time 401-retry path.
+
+#### Scenario: Concurrent guardian + 401-refresh coalesce to one OAuth call
+
+- **GIVEN** a Claude account with a near-expired access token
+- **WHEN** the auth guardian scheduler begins a refresh for the account
+- **AND** simultaneously, a request-time 401 handler begins a refresh for the same account
+- **THEN** the system issues exactly ONE `POST https://platform.claude.com/v1/oauth/token` for that account
+- **AND** both the guardian and the request handler receive the same rotated access + refresh tokens
+- **AND** Anthropic does not see a second refresh request that could invalidate the first
+
+#### Scenario: Concurrent requests on the same account do not both rotate
+
+- **GIVEN** a Claude account
+- **WHEN** two simultaneous `POST /claude/v1/messages` requests both receive 401 from Anthropic
+- **THEN** the second request waits on the first request's refresh to complete
+- **AND** only one Anthropic OAuth refresh call is issued
+- **AND** both requests retry with the same new access token
+
+#### Scenario: Serialization is per-account, not global
+
+- **GIVEN** two distinct Claude accounts `A` and `B` both due for refresh
+- **WHEN** the auth guardian scheduler refreshes both at the same tick
+- **THEN** the two refresh calls run in parallel (they are not serialized against each other)
+- **AND** the singleflight lock for `A` does not block the refresh of `B`
