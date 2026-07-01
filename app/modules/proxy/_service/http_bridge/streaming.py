@@ -661,6 +661,7 @@ class _HTTPBridgeStreamingMixin:
                     affinity=affinity,
                     api_key=api_key,
                     request_model=effective_payload.model,
+                    request_service_tier=request_state.requested_service_tier,
                     idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                         affinity=affinity,
                         idle_ttl_seconds=idle_ttl_seconds,
@@ -826,6 +827,7 @@ class _HTTPBridgeStreamingMixin:
                             affinity=affinity,
                             api_key=api_key,
                             request_model=effective_payload.model,
+                            request_service_tier=request_state.requested_service_tier,
                             idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                                 affinity=affinity,
                                 idle_ttl_seconds=idle_ttl_seconds,
@@ -1309,6 +1311,7 @@ class _HTTPBridgeStreamingMixin:
                         affinity=affinity,
                         api_key=api_key,
                         request_model=retry_payload.model,
+                        request_service_tier=request_state.requested_service_tier,
                         idle_ttl_seconds=_effective_http_bridge_idle_ttl_seconds(
                             affinity=affinity,
                             idle_ttl_seconds=idle_ttl_seconds,
