@@ -326,7 +326,7 @@ class ClaudeAuthManager:
         )
         return result
 
-    async def _run_refresh(self, account: Account, refresh_token_bytes: bytes) -> ClaudeRefreshResult:
+    async def _run_refresh(self, account: Account, refresh_token_bytes: bytes) -> ClaudeRefreshResult | None:
         """Inner body of :meth:`rotate_claude_access_token`.
 
         Decrypts the refresh token, calls the OAuth client, handles the

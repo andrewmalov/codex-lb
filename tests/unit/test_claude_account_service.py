@@ -139,6 +139,10 @@ class _FakeRepo:
         self.find_due_calls.append(skew_seconds)
         return []
 
+    async def count_active(self) -> int:
+        """No-op stub matching :meth:`ClaudeAccountRepository.count_active`."""
+        return sum(1 for row in self.persisted.values() if row.get("status") == AccountStatus.ACTIVE.value)
+
     def seed(self, account_id: str = "claude-abc-123", *, disabled: bool = False) -> Account:
         encryptor = _FakeEncryptor()
         account = Account(
