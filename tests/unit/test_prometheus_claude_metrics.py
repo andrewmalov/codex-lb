@@ -488,7 +488,7 @@ async def test_two_consecutive_401s_increment_requests_total_auth_error(
         async def get_access_token(self, account):
             return "AT"
 
-        async def rotate_claude_access_token(self, account, *, force=False):
+        async def rotate_claude_access_token(self, account):
             self.rotate_calls += 1
             return type("R", (), {"access_token": "AT2", "refresh_token": "RT2", "expires_in": 3600})()
 
@@ -571,7 +571,7 @@ async def test_429_increments_requests_total_rate_limited(
         async def get_access_token(self, account):
             return "AT"
 
-        async def rotate_claude_access_token(self, account, *, force=False):
+        async def rotate_claude_access_token(self, account):
             return None
 
     class _LB:
@@ -660,7 +660,7 @@ async def test_successful_request_increments_requests_total_success(
         async def get_access_token(self, account):
             return "AT"
 
-        async def rotate_claude_access_token(self, account, *, force=False):
+        async def rotate_claude_access_token(self, account):
             return None
 
     class _LB:

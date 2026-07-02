@@ -380,28 +380,40 @@ async def test_rotate_claude_access_token_persists_new_tokens(
 
 
 @pytest.mark.asyncio
-async def test_rotate_with_missing_refresh_token_drops_existing(
-    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
+async def test_rotate_with_missing_refresh_token_drops_existing_and_deactivates(
+    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor, caplog
 ) -> None:
     """Defensive: if Anthropic ever omits the new refresh token (not observed
-    in verified captures), the existing one MUST be discarded, not preserved.
+    in verified captures), the existing one MUST be discarded AND the
+    account MUST be deactivated with reason ``refresh_token_missing:<msg>``
+    so the operator is forced to re-authorize.
     """
+    import logging
+
     account = fake_repo.seed(account_id="claude-abc-123")
     original_rt = account.claude_refresh_token_encrypted
     oauth = _FakeOAuthClient()
     oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token=None, expires_in=3600)
     manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
-    result = await manager.rotate_claude_access_token(account)
+    with caplog.at_level(logging.WARNING, logger="app.modules.claude.auth_manager"):
+        result = await manager.rotate_claude_access_token(account)
 
-    assert result is not None
+    # ``rotate_claude_access_token`` returns None so the proxy service aborts
+    # the request instead of retrying (mirrors the invalid_grant contract).
+    assert result is None
     persisted = fake_repo.persisted[account.id]
     # Stored refresh token should now be None — the old value was discarded.
     assert persisted["claude_refresh_token_encrypted"] is None
-    # Original encrypted bytes did not survive (repo recorded a None update).
     assert fake_repo.update_tokens_calls[-1]["refresh_token_encrypted"] is None
-    # Original reference also gone.
     assert persisted["claude_refresh_token_encrypted"] != original_rt
+    # Account was deactivated with the typed reason.
+    deactivate = fake_repo.deactivate_calls[-1]
+    assert deactivate[0] == account.id
+    assert deactivate[1].startswith("refresh_token_missing:")
+    # Structured warning was emitted.
+    matching = [r for r in caplog.records if r.message == "claude.refresh.refresh_token_missing"]
+    assert matching
 
 
 @pytest.mark.asyncio
@@ -555,18 +567,133 @@ async def test_rotate_different_accounts_run_independently(
 
 
 @pytest.mark.asyncio
-async def test_rotate_force_skips_nonexpired_check(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
-    """``force=True`` always invokes the OAuth refresh, even for fresh tokens.
-    A ``force=False`` call on a not-yet-due account is currently treated as
-    'refresh anyway' (the manager does not own the skew check — the
-    guardian / 401 path decides when to call); ensure we at least don't gate
-    callers out."""
+async def test_rotate_unconditionally_refreshes(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
+    """``rotate_claude_access_token`` always invokes the OAuth refresh.
+
+    The manager does not own the skew check — the guardian / 401 path
+    decides when to call. The signature is intentionally parameter-less
+    so the two callers share a single entrypoint that does NOT double-gate.
+    """
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
     manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
-    result = await manager.rotate_claude_access_token(account, force=True)
+    result = await manager.rotate_claude_access_token(account)
+
+    assert result is not None
+    assert len(oauth.refresh_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_rotate_refresh_token_missing_deactivates_account(
+    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor, caplog
+) -> None:
+    """When Anthropic omits the new ``refresh_token``, the manager MUST:
+
+    1. Persist the new access token and clear the refresh token slot to NULL.
+    2. Deactivate the account with reason ``refresh_token_missing:<msg>``.
+    3. Return ``None`` to the caller (matching the invalid_grant contract).
+    4. Emit a structured ``claude.refresh.refresh_token_missing`` log line.
+    """
+    import logging
+
+    account = fake_repo.seed(account_id="claude-abc-123")
+    oauth = _FakeOAuthClient()
+    # Anthropic omits ``refresh_token`` from the response.
+    oauth.next_result = ClaudeRefreshResult(access_token="AT_NEW", refresh_token=None, expires_in=3600)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.claude.auth_manager"):
+        result = await manager.rotate_claude_access_token(account)
+
+    # Manager returns None (matches the invalid_grant contract).
+    assert result is None
+    # update_tokens was called with refresh_token_encrypted=None.
+    update = fake_repo.update_tokens_calls[-1]
+    assert update["account_id"] == account.id
+    assert update["refresh_token_encrypted"] is None
+    # Account is deactivated with the typed reason.
+    deactivate = fake_repo.deactivate_calls[-1]
+    assert deactivate[0] == account.id
+    assert deactivate[1].startswith("refresh_token_missing:")
+    # Structured warning log was emitted.
+    matching = [r for r in caplog.records if r.message == "claude.refresh.refresh_token_missing"]
+    assert matching, "expected a structured 'claude.refresh.refresh_token_missing' WARNING log"
+    record = matching[0]
+    assert getattr(record, "event", None) == "claude.refresh.refresh_token_missing"
+    assert record.levelno == logging.WARNING
+
+
+@pytest.mark.asyncio
+async def test_rotate_acquires_postgres_advisory_lock_when_dialect_postgres(
+    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
+) -> None:
+    """When the repo carries a Postgres-backed SQLAlchemy session, the manager
+    MUST acquire ``pg_advisory_xact_lock(hashtext('claude-refresh:{id}'))``
+    BEFORE decrypting the refresh token. Cross-replica serialization is the
+    spec-mandated guarantee; without it, two replicas can both rotate the
+    same account and invalidate each other's refresh tokens.
+    """
+    account = fake_repo.seed(account_id="claude-abc-123")
+    oauth = _FakeOAuthClient()
+    oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
+
+    # Stand-in session that records the SQL it sees and reports Postgres dialect.
+    class _FakeBind:
+        dialect = type("D", (), {"name": "postgresql"})()
+
+    class _FakeSession:
+        def __init__(self) -> None:
+            self.executed: list[tuple[str, dict]] = []
+            self.bind = _FakeBind()
+
+        def get_bind(self):
+            return self.bind
+
+        async def execute(self, statement, params=None):
+            text_sql = getattr(statement, "text", str(statement))
+            self.executed.append((text_sql, params or {}))
+
+    fake_session = _FakeSession()
+
+    class _RepoWithSession(_FakeRepo):
+        # The manager reads ``_session`` via ``getattr(self._repo, '_session', None)``
+        # so we expose the fake session under that attribute.
+        pass
+
+    repo = _RepoWithSession()
+    repo._session = fake_session  # type: ignore[attr-defined]
+
+    manager = ClaudeAuthManager(repo=repo, encryptor=fake_encryptor, oauth_client=oauth)
+
+    result = await manager.rotate_claude_access_token(account)
+
+    assert result is not None
+    # The first SQL executed MUST be the advisory lock acquisition with the
+    # canonical scope string. Subsequent statements are the OAuth refresh
+    # persist path.
+    lock_statements = [(sql, params) for sql, params in fake_session.executed if "pg_advisory_xact_lock" in sql]
+    assert lock_statements, "expected pg_advisory_xact_lock to be acquired"
+    sql, params = lock_statements[0]
+    assert "hashtext" in sql
+    assert params.get("lock_key") == "claude-refresh:claude-abc-123"
+
+
+@pytest.mark.asyncio
+async def test_rotate_skips_advisory_lock_when_session_missing(
+    fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
+) -> None:
+    """When the repo does NOT expose a session (test stubs, contract-only
+    callers), the manager MUST fall back to the in-process singleflight
+    alone. This is the SQLite / dev-mode path.
+    """
+    account = fake_repo.seed(account_id="claude-abc-123")
+    oauth = _FakeOAuthClient()
+    oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+
+    result = await manager.rotate_claude_access_token(account)
 
     assert result is not None
     assert len(oauth.refresh_calls) == 1

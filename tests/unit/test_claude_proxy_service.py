@@ -232,10 +232,8 @@ class _FakeAuthManager(ClaudeAuthManager):
     async def rotate_claude_access_token(
         self,
         account: Account,
-        *,
-        force: bool = False,
     ) -> Any:
-        self.rotate_calls.append({"account_id": account.id, "force": force})
+        self.rotate_calls.append({"account_id": account.id})
         return self.rotate_return
 
 
@@ -460,9 +458,9 @@ async def test_first_401_triggers_rotate_and_retry(proxy_service: ClaudeProxySer
     )
 
     assert out_body == {"id": "msg_01"}
-    # rotate called once (force=True).
+    # rotate called once on the 401-retry path.
     assert len(deps.auth.rotate_calls) == 1
-    assert deps.auth.rotate_calls[0]["force"] is True
+    assert deps.auth.rotate_calls[0]["account_id"] == account.id
     # chat called twice — first 401, then retry succeeds.
     assert len(deps.chat.send_messages_calls) == 2
 

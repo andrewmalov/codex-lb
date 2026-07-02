@@ -26,6 +26,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
 
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from app.core.clients.anthropic.errors import ClaudeAuthError, ClaudeUpstreamError
 from app.core.clients.anthropic.oauth import ClaudeRefreshResult
 from app.core.config.settings import get_settings
@@ -35,6 +38,29 @@ from app.db.models import Account, AccountStatus
 from app.modules.claude.repository import ClaudeAccountRepository
 
 logger = logging.getLogger(__name__)
+
+
+# --- Cross-replica serialization -------------------------------------------
+
+
+# Scope-prefix convention shared by every PostgreSQL advisory lock in this
+# codebase (``reset-credit-redeem``, ``merge-email``, ``account-id``,
+# ``rate-limiter``). The string is hashed by ``hashtext`` server-side.
+_CLAUDE_REFRESH_LOCK_SCOPE = "claude-refresh"
+
+
+async def _acquire_postgresql_claude_refresh_lock(session: AsyncSession, account_id: str) -> None:
+    """Acquire a per-account cross-process lock for the duration of ``session``.
+
+    Uses ``pg_advisory_xact_lock(hashtext(:key))`` so the lock auto-releases on
+    transaction commit and never leaks across rollbacks. Mirrors
+    ``app.modules.rate_limit_reset_credits.api._acquire_postgresql_reset_credit_redeem_lock``.
+    """
+    lock_key = f"{_CLAUDE_REFRESH_LOCK_SCOPE}:{account_id}"
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": lock_key},
+    )
 
 
 # --- Public exceptions -----------------------------------------------------
@@ -262,19 +288,21 @@ class ClaudeAuthManager:
     async def rotate_claude_access_token(
         self,
         account: Account,
-        *,
-        force: bool = False,
     ) -> ClaudeRefreshResult | None:
         """Rotate the access token for ``account``.
 
         Serializes concurrent callers behind a per-account singleflight lock
-        (see :class:`_ClaudeRefreshSingleflight`). Concurrent refreshes
-        share the same in-flight ``POST /v1/oauth/token`` call.
+        (see :class:`_ClaudeRefreshSingleflight`). On Postgres the call is
+        additionally serialized across processes via
+        ``pg_advisory_xact_lock(hashtext("claude-refresh:{id}"))`` (see
+        :func:`_acquire_postgresql_claude_refresh_lock`). Concurrent
+        refreshes share the same in-flight ``POST /v1/oauth/token`` call.
 
         Returns:
             ``ClaudeRefreshResult`` on success; ``None`` when the refresh
-            was aborted by ``invalid_grant`` (the account is then
-            DEACTIVATED with reason ``invalid_grant: <body>``).
+            was aborted by ``invalid_grant`` or by an Anthropic response
+            that omitted the new ``refresh_token`` (the account is then
+            DEACTIVATED with a descriptive reason).
 
         Raises:
             :class:`app.core.clients.anthropic.errors.ClaudeUpstreamError`
@@ -282,18 +310,15 @@ class ClaudeAuthManager:
             the caller may retry.
 
         Notes:
-            ``force`` is reserved for the 401-retry path. Today the manager
-            refreshes unconditionally because the caller (guardian /
-            401-retry) is already responsible for the "do I need a
-            refresh?" decision. The parameter is in the signature so the
-            guardian scheduler and the 401-retry path share a single
-            entrypoint that does NOT double-gate.
+            The manager refreshes unconditionally because the caller
+            (guardian scheduler / 401-retry path) is already responsible
+            for the "do I need a refresh?" decision. The guardian scheduler
+            and the 401-retry path share this single entrypoint so they
+            cannot double-gate.
         """
         refresh_token_bytes = account.claude_refresh_token_encrypted
         if refresh_token_bytes is None:
             raise ClaudeAuthError("no refresh token stored for account")
-
-        del force  # see docstring: gating is the caller's responsibility
 
         result = await _CLAUDE_REFRESH_SINGLEFLIGHT.run(
             account.id,
@@ -307,9 +332,31 @@ class ClaudeAuthManager:
         Decrypts the refresh token, calls the OAuth client, handles the
         three response classes (success / invalid_grant / upstream error),
         and persists rotated credentials when applicable.
+
+        On Postgres the call is wrapped in a per-account cross-process
+        advisory lock (``pg_advisory_xact_lock(hashtext("claude-refresh:{id}"))``)
+        so concurrent rotations from other replicas or other in-process
+        tasks serialize on the database. The lock auto-releases on the
+        surrounding transaction commit so it never leaks. SQLite is
+        single-process; the in-process singleflight in
+        ``_CLAUDE_REFRESH_SINGLEFLIGHT`` is sufficient.
         """
         if self._oauth_client is None:
             raise ClaudeAuthError("no OAuth client configured")
+
+        # Acquire the cross-process lock before decrypting the refresh
+        # token. Decryption itself is cheap, but acquiring the lock first
+        # means a second caller that is already blocked on the lock will
+        # not see the in-flight token material until commit.
+        session = self._resolve_repo_session()
+        if session is not None and session.get_bind().dialect.name == "postgresql":
+            await _acquire_postgresql_claude_refresh_lock(session, account.id)
+        elif session is None:
+            logger.debug(
+                "claude.refresh.single_process_lock_only account_id=%s "
+                "(no SQLAlchemy session attached to repo; relying on in-process singleflight)",
+                account.id,
+            )
 
         refresh_token = self._encryptor.decrypt(refresh_token_bytes)
         try:
@@ -322,9 +369,30 @@ class ClaudeAuthManager:
             self._record_metric("error")
             raise
 
+        # Defensive: Anthropic always rotates the refresh token, but the public
+        # contract does not forbid omission. A `None` refresh token cannot be
+        # silently coerced to the previous value because Anthropic's single-use
+        # refresh-token rotation would 400 with `invalid_grant` on the next
+        # refresh attempt. Deactivate explicitly so the operator re-authorizes.
+        if result.refresh_token is None:
+            await self._persist_rotated_credentials(account, result)
+            await self._deactivate_for_missing_refresh_token(account)
+            self._record_metric("invalid_grant")
+            return None
+
         await self._persist_rotated_credentials(account, result)
         self._record_metric("success")
         return result
+
+    def _resolve_repo_session(self) -> AsyncSession | None:
+        """Return the SQLAlchemy session backing ``self._repo`` if available.
+
+        The repo port is duck-typed (see :class:`ClaudeAccountRepository`
+        Protocol); some test stubs do not expose a ``_session`` attribute.
+        This helper returns ``None`` in those cases so the caller can fall
+        back to the in-process singleflight alone.
+        """
+        return getattr(self._repo, "_session", None)
 
     async def _deactivate_for_invalid_grant(self, account: Account, error: ClaudeAuthError) -> None:
         """Mark the account DEACTIVATED for ``invalid_grant`` and emit the
@@ -341,14 +409,43 @@ class ClaudeAuthManager:
         )
         await self._repo.deactivate(account.id, reason=reason)
 
+    async def _deactivate_for_missing_refresh_token(self, account: Account) -> None:
+        """Mark the account DEACTIVATED when Anthropic omits the new refresh token.
+
+        Emits the structured ``claude.refresh.refresh_token_missing`` log line
+        required by the spec so the operator can re-authorize. The deactivate
+        reason is the typed ``refresh_token_missing:`` prefix so dashboards can
+        filter on it independently of ``invalid_grant``.
+        """
+        message = "Anthropic refresh response omitted refresh_token"
+        logger.warning(
+            "claude.refresh.refresh_token_missing",
+            extra={
+                "event": "claude.refresh.refresh_token_missing",
+                "account_id": account.id,
+                "severity": "warning",
+            },
+        )
+        await self._repo.deactivate(
+            account.id,
+            reason=f"refresh_token_missing:{message}",
+        )
+
     async def _persist_rotated_credentials(self, account: Account, result: ClaudeRefreshResult) -> None:
         """Persist rotated credentials for the given ``account``.
 
-        Unconditional rotation: when ``result.refresh_token`` is ``None``
-        (defensive — never observed in verified captures) the existing
-        refresh token bytes are discarded (column set to NULL) and the
-        account is left flagged so a future re-authorize flow can surface
-        it.
+        Unconditional rotation: the new ``access_token`` always overwrites
+        the old ciphertext, and the new ``refresh_token`` overwrites the
+        old refresh token when Anthropic returns one. When the response
+        omits ``refresh_token`` (``result.refresh_token is None``) the
+        repo's ``update_tokens`` sets the column to ``NULL`` and the
+        caller (:meth:`_run_refresh`) deactivates the account.
+
+        The defensive "missing refresh token" branch is NOT handled here
+        because the caller needs to know whether the refresh succeeded
+        (return ``ClaudeRefreshResult``) or whether the account was
+        deactivated (return ``None`` to the proxy service so it aborts
+        the request instead of retrying).
         """
         new_access = self._encryptor.encrypt(result.access_token)
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=result.expires_in - self._skew_seconds)

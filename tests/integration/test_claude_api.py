@@ -226,6 +226,78 @@ async def test_post_messages_streaming_returns_text_event_stream(
     assert "input_tokens" not in body_text
 
 
+@pytest.mark.asyncio
+async def test_post_messages_streaming_releases_iterator_on_unexpected_exception(
+    async_client, stubbed_claude_service, override_claude_key
+):
+    """Streaming path MUST release the upstream iterator when the chat
+    client raises a non-typed exception (e.g. transport disconnect).
+
+    Covers the spec requirement *Streaming proxy cleanup on unexpected
+    exceptions*: the ``_gen`` wrapper's ``finally`` block MUST call
+    ``aclose()`` on the underlying ``StreamChunk`` iterator even when the
+    async-for loop is interrupted by a ``RuntimeError`` (or any
+    non-typed exception class). The iterator's ``aclose`` is observable
+    via a wrapper that records invocations.
+    """
+    from types import SimpleNamespace
+
+    override_claude_key["key"] = SimpleNamespace(id="key-1", provider_scope="claude")
+
+    aclose_calls: list[None] = []
+
+    class _RecordingIterator:
+        """Async iterator that raises ``RuntimeError`` after the first chunk
+        and records ``aclose()`` invocations.
+        """
+
+        def __init__(self) -> None:
+            self._yielded_header = False
+
+        def __aiter__(self) -> "_RecordingIterator":
+            return self
+
+        async def __anext__(self):
+            if not self._yielded_header:
+                self._yielded_header = True
+                return StreamChunk(
+                    kind="headers",
+                    data={"anthropic-ratelimit-status": "allowed"},
+                )
+            raise RuntimeError("simulated transport disconnect")
+
+        async def aclose(self) -> None:
+            aclose_calls.append(None)
+
+    async def _exploding_stream(
+        *,
+        request_body: dict[str, Any],
+        api_key: Any,
+        request_id: str,
+    ) -> AsyncIterator[StreamChunk]:
+        return _RecordingIterator()
+
+    stubbed_claude_service.stream_messages = _exploding_stream  # type: ignore[method-assign]
+
+    body = {
+        "model": "claude-opus-4-8",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": True,
+    }
+    # The route handler propagates the RuntimeError out of the StreamingResponse
+    # body; the test client surfaces this as an internal error. We assert the
+    # observable contract (aclose called) rather than the HTTP status code,
+    # because StreamingResponse consumption is on the streaming boundary.
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        async with async_client.stream("POST", "/claude/v1/messages", json=body) as response:
+            async for _ in response.aiter_bytes():
+                pass
+
+    assert aclose_calls, "expected the iterator's aclose() to be invoked exactly once"
+
+
 # ---------------------------------------------------------------------------
 # /api/claude/accounts admin CRUD
 # ---------------------------------------------------------------------------
