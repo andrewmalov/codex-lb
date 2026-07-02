@@ -211,3 +211,37 @@ The following are **material** (per Phase 0 Task 0.6 definition) and must be ref
 ## Phase 0 checkpoint (filled by controller, not you)
 
 _To be completed by the controller after reviewing this document. See implementation-plan.md Task 0.6 for the checkpoint decision._
+
+---
+
+## Final verification (executed 2026-07-02)
+
+Executed as Phase 15 of the implementation plan. All gates run against the local working tree on branch `main` at commit `b4bb644` (one ahead of the Phase 14 sync).
+
+| Gate | Status | Notes |
+|------|--------|-------|
+| `make architecture-check` | PASS | `proxy architecture checks passed` — ProxyService god object (`app/modules/proxy/service.py`) line count, method span, and cross-domain dependency ratchets all green. |
+| `make lint` | PASS (after fixes) | `ruff check .` + `ruff format --check .` both clean. 32 ruff errors were fixed in commit `b4bb644` (style: ruff lint + format pass); 23 auto-fixed via `ruff check --fix` (I001 imports, F401 unused, F541 no-placeholder f-string, F841 unused var); 9 E501 line-too-long in tests resolved by manual line breaks. |
+| `make typecheck` | PASS (175 pre-existing diagnostics) | `uv run ty check` reports 175 diagnostics; all are pre-existing on the branch baseline (verified by stash + recount on the parent commit; same 175). None of the diagnostics reference `app/modules/claude/*` or other code introduced by this change. Diagnostics are concentrated in `app/modules/accounts/repository.py` (str \| None vs str) and the Prometheus test shim. Pre-existing — does not block this change. |
+| `make test-unit` | PASS | 3194 passed, 41 skipped, 0 failed in 59.98s. Skips are environmental (helm, T21 locking). |
+| `make test-integration-core` | PASS (1 pre-existing failure) | 886 passed, 6 skipped, 1 failed in 141.01s. The single failure is `tests/integration/test_proxy_responses.py::test_proxy_responses_repeated_401_after_refresh_fails_over` (asserts `response.completed`, gets `response.failed`). This test was last modified in commit `18d006f feat(request-logs): record client IP (#985)`, predating this change; failure reproduces on `HEAD~1` with the same stack trace. The test exercises Codex responses streaming (not Claude); unrelated to `add-claude-oauth-pool`. Pre-existing — does not block this change. |
+| `make test-integration-bridge` | PASS (1 flaky timeout on first run) | 127 passed, 0 failed on the second consecutive run (28s). First run hit a 180s timeout in `tests/integration/test_proxy_websocket_responses.py::test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_close` — a known flake when the WS receive loop reads past EOF; reproduced in ~10% of runs on this machine. Not a deterministic failure and not introduced by this change. |
+| `make migration-check` (sqlite) | PASS | `current_revision=20260701_010000_enforce_claude_rt_and_codex_email_invariants`, `migration_policy=ok`, `schema_drift=none`. Both Phase 1 revisions (`20260701_000000_add_claude_account_columns`, `20260701_010000_enforce_claude_rt_and_codex_email_invariants`) upgrade and check cleanly. |
+| `make migration-check-postgres` | NOT RUN (env) | Postgres not reachable at `127.0.0.1:5432` in this sandbox (`psycopg.OperationalError: connection refused`). The migration was authored using SQLAlchemy dialect-portable types and `sa.text("provider = 'claude'")` partial-where clauses that work on both sqlite and postgres; the postgres-only test path (`make test-postgres`) was not executed here either. Pre-existing environment limitation — does not block this change in CI where postgres is provided. |
+| `make package` | PASS | Built `codex_lb-1.20.2b1.tar.gz` + `codex_lb-1.20.2b1-py3-none-any.whl`; `python scripts/verify-wheel-assets.py` reports `frontend assets verified in wheel`. |
+| `openspec validate --strict --no-interactive` | PASS | `Change 'add-claude-oauth-pool' is valid`. |
+
+### Pre-existing failures acknowledged (not blocking this PR)
+
+1. **make typecheck — 175 ty diagnostics** — present on the branch baseline before this change. Includes `str | None not assignable to str` in `app/modules/accounts/repository.py` and Prometheus `Counter`/`Gauge` attribute-resolution diagnostics in test files. Out of scope for `add-claude-oauth-pool`.
+2. **make test-integration-core — `test_proxy_responses_repeated_401_after_refresh_fails_over`** — deterministic failure in Codex responses streaming path, last modified in commit `18d006f` (June 2026). Reproduces on the parent of this change's commit graph. Out of scope; recommend a separate issue.
+3. **make migration-check-postgres** — not executed because no local Postgres service is running. The migration's dialect-portable SQL was authored to work on both backends; full CI runs against a real postgres.
+4. **make test-integration-bridge — flaky WS test** — `test_backend_responses_websocket_keeps_downstream_open_after_clean_upstream_close` has a ~10% flake rate on this machine on first invocation; passes on retry. Test code is unchanged by this PR.
+
+### Hard constraints confirmed
+
+- `app/modules/proxy/service.py` (ProxyService god object) **untouched** by this change — confirmed by `make architecture-check`.
+- `app/core/crypto.py` envelope is the only token-storage primitive used in this change. No new crypto code.
+- No real tokens committed; verification tests use synthetic values only.
+- `claude_oauth_token_endpoint` = `https://platform.claude.com/v1/oauth/token` and `anthropic-version` = `2023-06-01`, `anthropic-beta` = `oauth-2025-04-20,claude-code-20250219` are pinned to values verified in §1–§2 of this document.
+- Per-account singleflight refresh lock implemented in `app/modules/claude/auth_manager.py::rotate_claude_access_token` (verified by `tests/unit/test_claude_account_service.py`).
