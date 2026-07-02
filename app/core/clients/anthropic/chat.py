@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import TYPE_CHECKING
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Literal, Mapping, Protocol
 
@@ -42,6 +43,9 @@ from app.core.clients.anthropic.errors import (
     ClaudeRateLimited,
     ClaudeUpstreamError,
 )
+
+if TYPE_CHECKING:
+    import aiohttp
 
 # Verified Anthropic header values (openspec/changes/add-claude-oauth-pool/notes.md §2).
 # Re-exported at module level so Phase 9 and tests can pin against the same
@@ -556,3 +560,55 @@ class _StreamingChatIterator:
         self._closed = True
         await _safe_aclose(self._inner_iter)
         await _safe_close(self._resp)
+
+
+class AiohttpClaudeChatTransport:
+    """Minimal aiohttp-backed adapter for :class:`ClaudeChatTransport`.
+
+    The chat client expects ``post`` and ``post_stream`` to return a
+    response-like object whose ``status``, ``headers``, ``json()``, and
+    ``content.iter_chunked`` are usable. aiohttp already provides all of
+    those — we just route the request through a shared client session so
+    connection pooling and the project's existing SSL/proxy wiring are
+    reused.
+    """
+
+    def __init__(self, session: "aiohttp.ClientSession") -> None:
+        self._session = session
+
+    async def post(
+        self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]
+    ) -> Any:
+        return await self._session.post(
+            url,
+            json=dict(json),
+            headers=dict(headers),
+        )
+
+    async def post_stream(
+        self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]
+    ) -> Any:
+        # ``Connection: close`` keeps the streaming flow aligned with the
+        # chat-client's ``resp.close()`` shutdown path; the shared
+        # connection pool will pick the next request up cleanly.
+        stream_headers = dict(headers)
+        stream_headers.setdefault("Connection", "close")
+        return await self._session.post(
+            url,
+            json=dict(json),
+            headers=stream_headers,
+        )
+
+
+def build_claude_chat_client(
+    *,
+    session: "aiohttp.ClientSession",
+    settings: Any,
+    base_url: str,
+) -> ClaudeChatClient:
+    """Construct a :class:`ClaudeChatClient` wired to the given aiohttp session."""
+    return ClaudeChatClient(
+        transport=AiohttpClaudeChatTransport(session),
+        settings=settings,
+        base_url=base_url,
+    )

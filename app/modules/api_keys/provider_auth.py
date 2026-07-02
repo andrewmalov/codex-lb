@@ -19,29 +19,42 @@ Usage::
     @router.post("/claude/v1/messages")
     async def messages(..., api_key=Depends(_claude_key)): ...
 
-The factory is intentionally tiny: we deliberately do not duplicate any of the
-existing validator's caching, header extraction, or error-mapping logic. The
-dependency reuses the already-validated :class:`ApiKeyData` returned by the
-existing dependency and only adds one provider-scope check on top of it.
+The factory is intentionally tiny: we deliberately do not duplicate any of
+the existing validator's caching, header extraction, or error-mapping logic.
+The dependency reuses the already-validated :class:`ApiKeyData` returned by
+the existing dependency and only adds one provider-scope check on top of it.
 """
 
 from __future__ import annotations
 
+from functools import partial
 from typing import Any
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException
 
 from app.core.auth.dependencies import validate_proxy_api_key
 
 
-async def _existing_validate_proxy_api_key(request: Request) -> Any:
-    """Thin alias used by tests to patch in a stub validator.
+def _provider_scope_mismatch(provider: str) -> HTTPException:
+    return HTTPException(
+        status_code=403,
+        detail=f"API key is not authorized for provider '{provider}'",
+    )
 
-    Production code calls :func:`validate_proxy_api_key` directly; the alias
-    exists so unit tests can ``monkeypatch`` a single, well-known attribute
-    name without touching the production dependency import.
+
+def _enforce_provider_scope(api_key: Any, provider: str) -> Any:
+    """Reject keys whose ``provider_scope`` does not include ``provider``.
+
+    ``provider_scope`` is stored as a comma-separated string per the Phase 1
+    schema; we split on ``,`` so the legacy ``"codex"`` value, the dual
+    ``"codex,claude"`` value, and the new ``"claude"`` value are all
+    unambiguous. An empty / missing scope is treated as no authorization
+    rather than universal access.
     """
-    return await validate_proxy_api_key(request)
+    scope = (getattr(api_key, "provider_scope", "") or "")
+    if provider not in scope.split(","):
+        raise _provider_scope_mismatch(provider)
+    return api_key
 
 
 def api_key_validator_with_provider(provider: str):
@@ -53,24 +66,20 @@ def api_key_validator_with_provider(provider: str):
     ``provider_scope`` does not include ``provider`` the dependency raises
     HTTP 403 with a descriptive detail string.
 
-    ``provider_scope`` is stored as a comma-separated string per the Phase 1
-    schema; we split on ``,`` so the legacy ``"codex"`` value, the dual
-    ``"codex,claude"`` value, and the new ``"claude"`` value are all
-    unambiguous. An empty / missing scope is treated as no authorization
-    rather than universal access.
+    The wrapper intentionally exposes ``validate`` as the public symbol so
+    tests / callers can ``app.dependency_overrides[provider_auth.claude_key] = ...``
+    to swap in a stub without the inner ``validate_proxy_api_key`` dependency
+    being invoked.
     """
 
-    async def _validate(request: Request) -> Any:
-        api_key = await _existing_validate_proxy_api_key(request)
-        scope = (getattr(api_key, "provider_scope", "") or "")
-        if provider not in scope.split(","):
-            raise HTTPException(
-                status_code=403,
-                detail=f"API key is not authorized for provider '{provider}'",
-            )
-        return api_key
+    async def validate(api_key: Any = Depends(validate_proxy_api_key)) -> Any:
+        return _enforce_provider_scope(api_key, provider)
 
-    return _validate
+    validate.__name__ = f"validate_provider_scope_{provider}"
+    return validate
 
 
-__all__ = ["api_key_validator_with_provider"]
+__all__ = [
+    "api_key_validator_with_provider",
+    "_enforce_provider_scope",
+]

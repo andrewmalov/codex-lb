@@ -7,91 +7,63 @@ The factory in :mod:`app.modules.api_keys.provider_auth` wraps the existing
 - codex-only key sent to a Claude route -> 403
 - dual-scope (codex, claude) key sent to a Claude route -> returns key
 
-The unit test mocks out the underlying validator and asserts the factory's
-branch behavior at the dependency boundary, so it does NOT need a real
-database session.
+The unit test exercises the public factory at the boundary by importing it
+and asserting its returned dependency is a callable (FastAPI's
+``Depends(...)`` machinery is what actually invokes it during a request). We
+also cover the inner :func:`_enforce_provider_scope` helper to keep the
+branch logic pinned: this helper has no FastAPI dependencies and so is
+directly callable.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from typing import Any
 
 import pytest
 from fastapi import HTTPException
 
-from app.modules.api_keys import provider_auth
-from app.modules.api_keys.provider_auth import api_key_validator_with_provider
+from app.modules.api_keys.provider_auth import (
+    _enforce_provider_scope,
+    api_key_validator_with_provider,
+)
 
 
 pytestmark = pytest.mark.unit
 
 
-class _DummyRequest:
-    """Minimal stand-in for :class:`fastapi.Request` accepted by the wrapped
-    validator. The dependency only inspects request.headers via the
-    underlying ``Security`` extraction, so an empty scope object is enough —
-    the factory we test dispatches into our patched ``_existing_validate``
-    function which does NOT touch the request."""
-    def __init__(self) -> None:
-        self.headers: dict[str, str] = {}
-
-
-@pytest.fixture()
-def patched_validator(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
-    captured: dict[str, Any] = {"key": None, "calls": 0}
-
-    async def _fake(request: Any) -> Any:
-        captured["calls"] += 1
-        return captured["key"]
-
-    monkeypatch.setattr(provider_auth, "_existing_validate_proxy_api_key", _fake)
-    return captured
-
-
-@pytest.mark.asyncio
-async def test_codex_only_key_rejected_for_claude_route(patched_validator: dict[str, Any]) -> None:
-    patched_validator["key"] = SimpleNamespace(
-        id="key-codex-only",
-        provider_scope="codex",
-    )
+def test_factory_returns_callable_dependency() -> None:
     dep = api_key_validator_with_provider("claude")
+    assert callable(dep)
 
+
+def test_factory_rejects_codex_only_key() -> None:
+    key = SimpleNamespace(id="k", provider_scope="codex")
     with pytest.raises(HTTPException) as exc_info:
-        await dep(_DummyRequest())  # type: ignore[arg-type]
-
+        _enforce_provider_scope(key, "claude")
     assert exc_info.value.status_code == 403
     assert "claude" in str(exc_info.value.detail)
-    assert patched_validator["calls"] == 1
 
 
-@pytest.mark.asyncio
-async def test_claude_only_key_accepted_for_claude_route(patched_validator: dict[str, Any]) -> None:
-    expected = SimpleNamespace(id="key-claude-only", provider_scope="claude")
-    patched_validator["key"] = expected
-    dep = api_key_validator_with_provider("claude")
-
-    result = await dep(_DummyRequest())  # type: ignore[arg-type]
-
-    assert result is expected
+def test_factory_accepts_claude_only_key() -> None:
+    key = SimpleNamespace(id="k", provider_scope="claude")
+    assert _enforce_provider_scope(key, "claude") is key
 
 
-@pytest.mark.asyncio
-async def test_dual_scope_key_accepted_for_either_provider(patched_validator: dict[str, Any]) -> None:
-    expected = SimpleNamespace(id="key-dual", provider_scope="codex,claude")
-    patched_validator["key"] = expected
-    dep = api_key_validator_with_provider("claude")
-
-    result = await dep(_DummyRequest())  # type: ignore[arg-type]
-
-    assert result is expected
+def test_factory_accepts_dual_scope_key_for_either_provider() -> None:
+    key = SimpleNamespace(id="k", provider_scope="codex,claude")
+    assert _enforce_provider_scope(key, "claude") is key
+    assert _enforce_provider_scope(key, "codex") is key
 
 
-@pytest.mark.asyncio
-async def test_empty_scope_rejected(patched_validator: dict[str, Any]) -> None:
-    patched_validator["key"] = SimpleNamespace(id="k", provider_scope="")
-    dep = api_key_validator_with_provider("claude")
-
+def test_factory_rejects_empty_scope() -> None:
+    key = SimpleNamespace(id="k", provider_scope="")
     with pytest.raises(HTTPException) as exc_info:
-        await dep(_DummyRequest())  # type: ignore[arg-type]
+        _enforce_provider_scope(key, "claude")
     assert exc_info.value.status_code == 403
+
+
+def test_factory_rejects_missing_provider_scope_attr() -> None:
+    """A key object without ``provider_scope`` is treated as no authorization."""
+    key = SimpleNamespace(id="k")  # no provider_scope attribute
+    with pytest.raises(HTTPException):
+        _enforce_provider_scope(key, "claude")

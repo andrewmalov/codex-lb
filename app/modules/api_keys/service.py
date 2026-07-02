@@ -329,6 +329,7 @@ class ApiKeyData:
     account_assignment_scope_enabled: bool = False
     assigned_account_ids: list[str] = field(default_factory=list)
     pooled_credits: "PooledCreditData | None" = None
+    provider_scope: str = "codex"
 
 
 @dataclass(frozen=True, slots=True)
@@ -1605,6 +1606,7 @@ def _to_api_key_data(
         account_assignment_scope_enabled=getattr(row, "account_assignment_scope_enabled", False),
         assigned_account_ids=[assignment.account_id for assignment in account_assignments],
         pooled_credits=pooled_credits,
+        provider_scope=getattr(row, "provider_scope", None) or "codex",
     )
 
 
