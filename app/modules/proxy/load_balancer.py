@@ -34,6 +34,7 @@ from app.core.balancer import (
     select_account,
 )
 from app.core.balancer.types import UpstreamError
+from app.core.clients.anthropic.headers import parse_anthropic_rate_limit_headers
 from app.core.config import settings as config_settings
 from app.core.config.settings import get_settings
 from app.core.config.settings_cache import get_settings_cache
@@ -820,7 +821,7 @@ class LoadBalancer:
             all_accounts = [
                 account
                 for account in all_accounts
-                if getattr(account, "provider", "codex") == effective_provider
+                if (getattr(account, "provider", None) or "codex") == effective_provider
             ]
             quota_planner_repo = getattr(repos, "quota_planner", None)
             get_quota_planner_settings = getattr(quota_planner_repo, "get_settings", None)
@@ -1488,6 +1489,68 @@ class LoadBalancer:
             mark_account_routing_unavailable(account.id)
             self._selection_inputs_cache.invalidate()
 
+    async def record_claude_rate_limit_response(
+        self,
+        *,
+        account: Account,
+        headers: Mapping[str, str],
+        is_rate_limited_response: bool = True,
+    ) -> None:
+        """Persist cooldown + rate-limit cache for an Anthropic upstream response.
+
+        This is the Claude-side equivalent of :meth:`mark_rate_limit` and is
+        intentionally gated on ``provider == "claude"`` at the call site
+        (``ClaudeProxyService``). The behavior mirrors the Codex cooldown path:
+
+        - When ``is_rate_limited_response`` is true (the upstream returned 429
+          or ``anthropic-ratelimit-status: rejected``), the account is moved
+          to ``AccountStatus.RATE_LIMITED`` with ``reset_at`` parsed from
+          ``anthropic-ratelimit-requests-reset`` (RFC 3339 → unix epoch).
+        - When ``is_rate_limited_response`` is false (a successful 200), any
+          stale ``RATE_LIMITED`` cooldown is cleared back to ``ACTIVE``.
+        - In both cases the parsed 7-column ``anthropic-ratelimit-*`` cache
+          (``rate_limit_requests_remaining``, ``..._reset_at``, the two token
+          columns, and ``rate_limit_status``) is persisted via the repo helper
+          ``update_rate_limit_cache`` so the dashboard can surface the values.
+
+        The Codex cooldown path (``mark_rate_limit``) is untouched; callers
+        that route Codex traffic must keep using ``mark_rate_limit``.
+        """
+        parsed = parse_anthropic_rate_limit_headers(headers)
+        reset_at_int = _claude_reset_to_unix(parsed.get("rate_limit_requests_reset_at"))
+
+        lock = await self._get_account_lock(account.id)
+        async with lock:
+            if is_rate_limited_response:
+                status = AccountStatus.RATE_LIMITED
+            else:
+                status = AccountStatus.ACTIVE
+            async with self._repo_factory() as repos:
+                # Persist status + reset_at through the standard column write.
+                # ``blocked_at`` is intentionally left untouched: the Claude
+                # cooldown does not need the QUOTA_EXCEEDED blocked-at
+                # debounce the Codex path uses (verified contract:
+                # openspec/changes/add-claude-oauth-pool/specs/account-routing/
+                # spec.md — "Claude rate-limit cooldown mirrors Codex cooldown").
+                await repos.accounts.update_status(
+                    account.id,
+                    status,
+                    None,
+                    reset_at_int,
+                )
+                # Persist the rate-limit cache columns through the dedicated
+                # helper. The repo method is optional — when not implemented
+                # (older stubs), the call is silently skipped to keep the
+                # narrow scope of this branch.
+                update_cache = getattr(repos.accounts, "update_rate_limit_cache", None)
+                if callable(update_cache) and parsed:
+                    await update_cache(account.id, parsed)
+            self._selection_inputs_cache.invalidate()
+            runtime = self._runtime.get(account.id)
+            if runtime is not None:
+                runtime.reset_at = reset_at_int
+                runtime.version += 1
+
     async def record_error(self, account: Account) -> None:
         await self.record_errors(account, 1)
 
@@ -1747,6 +1810,22 @@ def _account_cap_error_code(lease_kind: AccountLeaseKind | None) -> str | None:
         return "account_response_create_cap"
     if lease_kind == "stream":
         return "account_stream_cap"
+    return None
+
+
+def _claude_reset_to_unix(value: object) -> int | None:
+    """Convert a parsed Anthropic reset value to a unix epoch int.
+
+    ``parse_anthropic_rate_limit_headers`` returns ``datetime`` for reset
+    columns; the ``Account.reset_at`` column, however, is a unix epoch
+    integer (matching the rest of the codebase). ``value`` may also be
+    ``None`` (header absent) or any unexpected shape from an older stub;
+    in those cases we return ``None`` so the column is left unchanged.
+    """
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp())
     return None
 
 
