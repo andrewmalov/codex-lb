@@ -119,7 +119,7 @@ app/core/clients/anthropic/
 
 | Column | Type | Default | Notes |
 |---|---|---|---|
-| `provider_scope` | `TEXT NOT NULL` | `'codex'` (backfilled) | CSV of `'codex'`, `'claude'`. Validated as a subset of allowed values on create/update. |
+| `provider_scope` | `TEXT NOT NULL` | `'codex'` (backfilled) | CSV of `'codex'`, `'claude'`. The API exposes this as a deduplicated, sorted JSON array of strings (`list[str]`); the field round-trips losslessly between the JSON array form and the CSV column. Validated as a subset of allowed values on create/update. |
 
 `request_logs` table:
 

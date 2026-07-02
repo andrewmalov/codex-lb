@@ -48,18 +48,20 @@ The system SHALL expose `GET /api/claude/accounts` returning a JSON array of acc
 
 ### Requirement: Disable and re-enable Claude accounts
 
-The system SHALL expose `PATCH /api/claude/accounts/{id}/disable` and `PATCH /api/claude/accounts/{id}/enable`. Disable SHALL set `accounts.is_active=false`, set `accounts.status` to a deactivated `AccountStatus` enum value, and record a `deactivation_reason`. Enable SHALL set `accounts.is_active=true` and `accounts.status` back to `AccountStatus.ACTIVE`. While disabled, the account SHALL NOT be selected by the load balancer.
+The system SHALL expose `PATCH /api/claude/accounts/{id}/disable` and `PATCH /api/claude/accounts/{id}/enable`. Disable SHALL set `accounts.status` to `AccountStatus.DEACTIVATED` and record a `deactivation_reason`. Enable SHALL set `accounts.status` back to `AccountStatus.ACTIVE`. While disabled, the account SHALL NOT be selected by the load balancer.
+
+> Note: Account active/inactive state is encoded solely via `accounts.status` (`AccountStatus` enum). The `Account` model has no `is_active` boolean column; all "active vs. inactive" decisions consult the status enum.
 
 #### Scenario: Disabled account is not selected
 
-- **GIVEN** one Claude account is active and one is disabled
+- **GIVEN** one Claude account has `status=ACTIVE` and one has `status=DEACTIVATED`
 - **WHEN** the proxy handles a `/claude/v1/messages` request
 - **THEN** only the active account is considered for selection
 
 #### Scenario: Re-enable restores selection
 
 - **WHEN** admin calls `PATCH /api/claude/accounts/{id}/enable` on a previously disabled account
-- **THEN** the account's `is_active=true` and `status=ACTIVE`
+- **THEN** the account's `status=ACTIVE`
 - **AND** the account becomes eligible for selection on the next request
 
 ### Requirement: Auth guardian refreshes Claude access tokens
@@ -77,7 +79,7 @@ The system SHALL run a background pass (extending the existing auth guardian sch
 - **GIVEN** the auth guardian refreshes a Claude access token
 - **AND** Anthropic responds with `invalid_grant`
 - **WHEN** the refresh completes
-- **THEN** the account's `is_active=false` and `status=DEACTIVATED`
+- **THEN** the account's `status=DEACTIVATED`
 - **AND** a structured `claude.refresh.failed` log line is emitted
 
 ### Requirement: Passthrough /claude/v1/messages
@@ -295,7 +297,7 @@ When `ClaudeOAuthClient.refresh` returns a 200 response, the system SHALL overwr
 - **GIVEN** a Claude account whose stored refresh token was already used once
 - **WHEN** the proxy attempts to refresh using that stale token
 - **AND** Anthropic responds with `400 invalid_grant`
-- **THEN** the account's `is_active=false` and `status=DEACTIVATED`
+- **THEN** the account's `status=DEACTIVATED`
 - **AND** a structured `claude.refresh.failed` log line is emitted
 - **AND** no further refresh attempts are made for that account until re-enabled
 
