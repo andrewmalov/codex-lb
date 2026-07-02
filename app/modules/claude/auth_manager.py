@@ -11,9 +11,9 @@ Source of truth: ``openspec/changes/add-claude-oauth-pool/specs/claude-oauth-poo
 is unconditional on every successful refresh*, *Per-account refresh
 serialization (singleflight)*, and *Disable and re-enable Claude accounts*.
 
-The metrics layer is conditionally resolved at call time — when Phase 13
-adds ``codex_lb_claude_refresh_total`` in
-``app/core/metrics/prometheus.py`` this module will see it without changes.
+Phase 13 wires ``codex_lb_claude_refresh_total`` via a direct import from
+``app.core.metrics.prometheus``; when ``prometheus_client`` is unavailable
+the imported counter is ``None`` and ``_record_metric`` becomes a no-op.
 """
 
 from __future__ import annotations
@@ -30,6 +30,7 @@ from app.core.clients.anthropic.errors import ClaudeAuthError, ClaudeUpstreamErr
 from app.core.clients.anthropic.oauth import ClaudeRefreshResult
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
+from app.core.metrics.prometheus import codex_lb_claude_refresh_total
 from app.db.models import Account, AccountStatus
 from app.modules.claude.repository import ClaudeAccountRepository
 
@@ -64,28 +65,6 @@ class ClaudeOAuthClientLike(Protocol):
     """
 
     async def refresh(self, refresh_token: str) -> ClaudeRefreshResult: ...
-
-
-# --- Metric shim -----------------------------------------------------------
-#
-# Phase 13 introduces ``codex_lb_claude_refresh_total{result="…"}`` in
-# ``app/core/metrics/prometheus.py``. Until that lands we resolve counters
-# defensively: missing attributes or missing modules return ``None`` and
-# every call site uses ``if metric is not None: metric.inc()``. Phase 13
-# MUST replace this shim with a direct import — the public surface
-# (``codex_lb_claude_refresh_total``) is what tests assert against so the
-# swap is observation-equivalent.
-
-
-def _resolve_metric(name: str) -> Any | None:
-    """Return the named Prometheus counter from ``app.core.metrics.prometheus``
-    when the symbol is registered, otherwise ``None``.
-    """
-    try:
-        from app.core.metrics import prometheus as prom  # noqa: PLC0415
-    except Exception:  # pragma: no cover - metrics module not yet wired
-        return None
-    return getattr(prom, name, None)
 
 
 # --- Singleflight ----------------------------------------------------------
@@ -411,15 +390,16 @@ class ClaudeAuthManager:
     def _record_metric(self, result: str) -> None:
         """Increment ``codex_lb_claude_refresh_total{result=…}``.
 
-        Resolves the counter lazily so the metrics module (Phase 13) is the
-        single source of truth. When prometheus_client is unavailable or
-        the counter is not yet registered, this is a no-op.
+        The counter is imported directly from
+        ``app.core.metrics.prometheus``. When ``prometheus_client`` is not
+        installed the counter is ``None`` (the module wires that fallback)
+        and this is a no-op. Any label error is swallowed so a metrics
+        outage cannot poison the auth lifecycle.
         """
-        counter = _resolve_metric("codex_lb_claude_refresh_total")
-        if counter is None:
+        if codex_lb_claude_refresh_total is None:
             return
         try:
-            counter.labels(result=result).inc()
+            codex_lb_claude_refresh_total.labels(result=result).inc()
         except Exception:  # pragma: no cover - metrics layer may reject labels
             logger.debug("metrics increment failed", exc_info=True)
 

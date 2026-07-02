@@ -80,6 +80,12 @@ class ClaudeAccountRepository(Protocol):
         window (i.e. ``claude_access_token_expires_at <= now + skew_seconds``).
         Used by the auth guardian scheduler in Phase 7."""
 
+    async def count_active(self) -> int:
+        """Return the number of ``provider='claude'`` accounts with
+        ``status = ACTIVE``. Drives the
+        ``codex_lb_claude_accounts_active`` Prometheus gauge at scrape
+        time (Phase 13, ``openspec/changes/add-claude-oauth-pool``)."""
+
 
 class SqlClaudeAccountRepository:
     """SQLAlchemy-backed implementation of :class:`ClaudeAccountRepository`."""
@@ -180,3 +186,19 @@ class SqlClaudeAccountRepository:
             .order_by(Account.claude_access_token_expires_at)
         )
         return list(result.scalars().all())
+
+    async def count_active(self) -> int:
+        """Count ``provider='claude'`` rows with ``status = ACTIVE``.
+
+        Mirrors the candidate filter the load balancer uses so the gauge
+        reflects the pool size that can actually serve traffic — a
+        DEACTIVATED row is not counted.
+        """
+        from sqlalchemy import func
+
+        result = await self._session.execute(
+            select(func.count(Account.id))
+            .where(Account.provider == "claude")
+            .where(Account.status == AccountStatus.ACTIVE)
+        )
+        return int(result.scalar_one() or 0)

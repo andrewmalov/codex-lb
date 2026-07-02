@@ -26,14 +26,15 @@ pure HTTP wrapper. The proxy's only added responsibilities are:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, AsyncIterator, Mapping, Protocol
 
 from app.core.clients.anthropic.chat import StreamChunk
 from app.core.clients.anthropic.errors import ClaudeAPIError, ClaudeAuthError, ClaudeRateLimited
 from app.core.clients.anthropic.headers import parse_anthropic_rate_limit_headers
+from app.core.metrics.prometheus import codex_lb_claude_accounts_active, codex_lb_claude_requests_total
 from app.core.utils.time import utcnow
-from app.db.models import Account, AccountStatus
+from app.db.models import Account
 
 logger = logging.getLogger(__name__)
 
@@ -200,6 +201,13 @@ class ClaudeProxyService:
             # so we can still record cooldown + persist cache before re-raising.
             headers = getattr(exc, "headers", {}) or {}
             await self._on_rate_limited(account=account, headers=headers)
+            self._record_request_metric("rate_limited")
+            raise
+        except ClaudeAuthError:
+            self._record_request_metric("auth_error")
+            raise
+        except ClaudeAPIError:
+            self._record_request_metric("upstream_error")
             raise
 
         await self._persist_rate_limit(account, headers)
@@ -210,6 +218,7 @@ class ClaudeProxyService:
             request_id=request_id,
             status_code="success",
         )
+        self._record_request_metric("success")
         return body, headers
 
     # ------------------------------------------------------------- streaming
@@ -263,6 +272,7 @@ class ClaudeProxyService:
                 await self._safe_aclose(iterator)
                 if retries >= 1:
                     await self._lb.record_error(account)
+                    self._record_request_metric("auth_error")
                     raise
                 retries += 1
                 rotated = await self._auth.rotate_claude_access_token(
@@ -270,6 +280,7 @@ class ClaudeProxyService:
                 )
                 if rotated is None:
                     # invalid_grant path — account is now DEACTIVATED; abort.
+                    self._record_request_metric("auth_error")
                     raise
                 access_token = await self._auth.get_access_token(account)
                 continue
@@ -277,6 +288,11 @@ class ClaudeProxyService:
                 await self._safe_aclose(iterator)
                 headers = getattr(exc, "headers", {}) or rate_limit_headers or {}
                 await self._on_rate_limited(account=account, headers=headers)
+                self._record_request_metric("rate_limited")
+                raise
+            except ClaudeAPIError:
+                await self._safe_aclose(iterator)
+                self._record_request_metric("upstream_error")
                 raise
             except BaseException:
                 await self._safe_aclose(iterator)
@@ -292,6 +308,7 @@ class ClaudeProxyService:
                 usage=usage_payload,
                 request_id=request_id,
             )
+        self._record_request_metric("success")
 
     # ------------------------------------------------------- internals
 
@@ -471,6 +488,21 @@ class ClaudeProxyService:
         except Exception:
             logger.debug("claude.last_used_at.update_failed", exc_info=True)
 
+    def _record_request_metric(self, status: str) -> None:
+        """Increment ``codex_lb_claude_requests_total{status=…}``.
+
+        The counter is imported from ``app.core.metrics.prometheus``; when
+        ``prometheus_client`` is unavailable the symbol is ``None`` and this
+        helper is a no-op. Any label error is swallowed so a metrics outage
+        cannot poison a Claude request — observability never gates the proxy.
+        """
+        if codex_lb_claude_requests_total is None:
+            return
+        try:
+            codex_lb_claude_requests_total.labels(status=status).inc()
+        except Exception:  # pragma: no cover - metrics layer may reject labels
+            logger.debug("claude metrics increment failed", exc_info=True)
+
     @staticmethod
     async def _safe_aclose(iterator: Any) -> None:
         """Best-effort close of a streaming iterator.
@@ -492,8 +524,40 @@ class ClaudeProxyService:
                 return
 
 
+# ---------------------------------------------------------------------------
+# Gauge refresh — exposed as a module-level helper so the /metrics ASGI
+# wrapper in ``app/main.py`` can call it once per scrape without coupling
+# the lifespan to the proxy service instance.
+# ---------------------------------------------------------------------------
+
+
+class _CountActiveRepo(Protocol):
+    """Subset of :class:`ClaudeAccountRepository` used by the gauge helper."""
+
+    async def count_active(self) -> int: ...
+
+
+async def refresh_claude_accounts_active_gauge(repo: _CountActiveRepo) -> int:
+    """Set ``codex_lb_claude_accounts_active`` from
+    ``ClaudeAccountRepository.count_active()`` and return the new value.
+
+    Called from the ``/metrics`` ASGI wrapper so every scrape sees a fresh
+    pool-size reading. When ``prometheus_client`` is unavailable the gauge
+    is ``None`` and this is a no-op that still returns the count so the
+    caller can log it if needed.
+    """
+    count = await repo.count_active()
+    if codex_lb_claude_accounts_active is not None:
+        try:
+            codex_lb_claude_accounts_active.set(count)
+        except Exception:  # pragma: no cover - metrics layer may reject labels
+            logger.debug("claude metrics gauge update failed", exc_info=True)
+    return count
+
+
 __all__ = [
     "ClaudeProxyService",
     "NoClaudeAccounts",
     "ProviderScopeMismatch",
+    "refresh_claude_accounts_active_gauge",
 ]
