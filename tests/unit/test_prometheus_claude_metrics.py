@@ -316,10 +316,17 @@ async def test_rotate_claude_access_token_success_increments_refresh_total(
 
     repo = _FakeRepo()
     account = repo.seed()
+    # ``scoped_repo_factory`` routes writes through the in-memory ``_FakeRepo``
+    # instead of ``SqlClaudeAccountRepository`` (which would need a real DB
+    # session). The session yielded by the default ``get_background_session``
+    # is irrelevant on this path because the test's write target is the
+    # ``_FakeRepo``; the real write codepath is exercised in
+    # ``tests/unit/test_claude_account_service.py``.
     manager = ClaudeAuthManager(
         repo=repo,  # type: ignore[arg-type]
         encryptor=_FakeEncryptor(),
         oauth_client=_FakeOAuthClient(),
+        scoped_repo_factory=lambda _session: repo,  # type: ignore[arg-type,return-value]
     )
 
     # Re-resolve the metrics symbol so we read the value from the loaded module.
@@ -429,6 +436,7 @@ async def test_rotate_claude_access_token_invalid_grant_increments_refresh_total
         repo=repo,  # type: ignore[arg-type]
         encryptor=_FakeEncryptor(),
         oauth_client=_FakeOAuthClient(),
+        scoped_repo_factory=lambda _session: repo,  # type: ignore[arg-type,return-value]
     )
 
     result = await manager.rotate_claude_access_token(account)

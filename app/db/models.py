@@ -71,7 +71,7 @@ class Account(Base):
         CheckConstraint("provider IN ('codex', 'claude')", name="ck_accounts_provider"),
         CheckConstraint(
             "((provider = 'claude') AND (claude_refresh_token_encrypted IS NOT NULL)) "
-            "OR ((provider != 'claude') AND (claude_refresh_token_encrypted IS NULL))",
+            "OR ((provider = 'codex') AND (claude_refresh_token_encrypted IS NULL))",
             name="ck_accounts_claude_rt_required",
         ),
         Index(

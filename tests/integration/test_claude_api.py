@@ -235,10 +235,15 @@ async def test_post_messages_streaming_releases_iterator_on_unexpected_exception
 
     Covers the spec requirement *Streaming proxy cleanup on unexpected
     exceptions*: the ``_gen`` wrapper's ``finally`` block MUST call
-    ``aclose()`` on the underlying ``StreamChunk`` iterator even when the
-    async-for loop is interrupted by a ``RuntimeError`` (or any
-    non-typed exception class). The iterator's ``aclose`` is observable
-    via a wrapper that records invocations.
+    ``aclose()`` on the underlying ``StreamChunk`` iterator exactly once
+    even when the async-for loop is interrupted by a ``RuntimeError``
+    (or any non-typed exception class). The iterator's ``aclose`` is
+    observable via a wrapper that records invocations.
+
+    The exception MUST propagate to the FastAPI request handler as the
+    original ``RuntimeError`` (NOT a typed HTTP error envelope) so the
+    proxy surfaces transport disconnects without pretending they were
+    one of the documented Claude error classes.
     """
     from types import SimpleNamespace
 
@@ -285,17 +290,17 @@ async def test_post_messages_streaming_releases_iterator_on_unexpected_exception
         "stream": True,
     }
     # The route handler propagates the RuntimeError out of the StreamingResponse
-    # body; the test client surfaces this as an internal error. We assert the
-    # observable contract (aclose called) rather than the HTTP status code,
-    # because StreamingResponse consumption is on the streaming boundary.
-    import contextlib
-
-    with contextlib.suppress(Exception):
+    # body; httpx surfaces this as an exception from ``aiter_bytes``. We catch
+    # the exception explicitly (NOT ``contextlib.suppress(Exception)``) so the
+    # test fails on a non-typed exception that the proxy accidentally swallows.
+    with pytest.raises(RuntimeError, match="simulated transport disconnect"):
         async with async_client.stream("POST", "/claude/v1/messages", json=body) as response:
             async for _ in response.aiter_bytes():
                 pass
 
-    assert aclose_calls, "expected the iterator's aclose() to be invoked exactly once"
+    # Exactly-once: the iterator's ``aclose`` MUST be invoked once and only
+    # once, regardless of how the generator is torn down.
+    assert aclose_calls == [None], f"expected aclose() to be invoked exactly once; got {len(aclose_calls)} call(s)"
 
 
 # ---------------------------------------------------------------------------

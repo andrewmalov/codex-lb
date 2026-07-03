@@ -21,7 +21,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Protocol
@@ -35,7 +36,8 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.metrics.prometheus import codex_lb_claude_refresh_total
 from app.db.models import Account, AccountStatus
-from app.modules.claude.repository import ClaudeAccountRepository
+from app.db.session import get_background_session
+from app.modules.claude.repository import ClaudeAccountRepository, SqlClaudeAccountRepository
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,35 @@ async def _acquire_postgresql_claude_refresh_lock(session: AsyncSession, account
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
         {"lock_key": lock_key},
     )
+
+
+@asynccontextmanager
+async def _claude_refresh_session() -> AsyncIterator[AsyncSession]:
+    """Yield a session for the refresh pass and commit on exit.
+
+    Used by :meth:`ClaudeAuthManager._run_refresh` so the cross-replica
+    advisory lock and the persistence write share one transaction. The
+    lock auto-releases on commit; an explicit commit is required because
+    :func:`app.db.session.get_background_session` rolls back any open
+    transaction in its ``finally`` block, which would silently drop the
+    rotated-credential writes.
+    """
+    async with get_background_session() as session:
+        try:
+            yield session
+            await session.commit()
+        except BaseException:
+            await _safe_rollback(session)
+            raise
+
+
+async def _safe_rollback(session: AsyncSession) -> None:
+    if not session.in_transaction():
+        return
+    try:
+        await session.rollback()
+    except BaseException:
+        return
 
 
 # --- Public exceptions -----------------------------------------------------
@@ -182,11 +213,28 @@ class ClaudeAuthManager:
         encryptor: TokenEncryptor | None = None,
         oauth_client: ClaudeOAuthClientLike | None = None,
         skew_seconds: int | None = None,
+        session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] | None = None,
+        scoped_repo_factory: Callable[[AsyncSession], ClaudeAccountRepository] | None = None,
     ) -> None:
         self._repo = repo
         self._encryptor = encryptor or TokenEncryptor()
         self._oauth_client = oauth_client
         self._skew_seconds = skew_seconds if skew_seconds is not None else self._resolve_skew_seconds()
+        # ``session_factory`` is the dependency seam for the refresh pass.
+        # Production defaults to :func:`_claude_refresh_session` (which wraps
+        # ``get_background_session`` with an explicit commit/rollback); tests
+        # inject a fake that yields an in-memory or stub session so the lock
+        # and commit logic can be exercised without a real database.
+        self._session_factory: Callable[[], AbstractAsyncContextManager[AsyncSession]] = (
+            session_factory if session_factory is not None else _claude_refresh_session
+        )
+        # ``scoped_repo_factory`` produces the per-pass repo that backs
+        # writes under the advisory-lock transaction. Production defaults
+        # to :class:`SqlClaudeAccountRepository`; tests inject a recording
+        # variant so assertions can inspect calls without a real DB.
+        self._scoped_repo_factory: Callable[[AsyncSession], ClaudeAccountRepository] = (
+            scoped_repo_factory if scoped_repo_factory is not None else SqlClaudeAccountRepository
+        )
 
     @staticmethod
     def _resolve_skew_seconds() -> int:
@@ -333,68 +381,75 @@ class ClaudeAuthManager:
         three response classes (success / invalid_grant / upstream error),
         and persists rotated credentials when applicable.
 
-        On Postgres the call is wrapped in a per-account cross-process
-        advisory lock (``pg_advisory_xact_lock(hashtext("claude-refresh:{id}"))``)
-        so concurrent rotations from other replicas or other in-process
-        tasks serialize on the database. The lock auto-releases on the
-        surrounding transaction commit so it never leaks. SQLite is
-        single-process; the in-process singleflight in
-        ``_CLAUDE_REFRESH_SINGLEFLIGHT`` is sufficient.
+        The whole refresh pass runs inside a dedicated background session
+        (see :func:`_claude_refresh_session`) so the cross-process advisory
+        lock and the persistence writes share one transaction. The lock
+        is acquired at the start of the pass, the writes commit on the
+        success path, and a rollback on the failure path still releases
+        the lock. SQLite is single-process; the in-process singleflight
+        in :data:`_CLAUDE_REFRESH_SINGLEFLIGHT` is sufficient on that
+        dialect and the advisory lock acquisition is skipped.
+
+        The injected ``self._repo`` is intentionally NOT used for writes
+        here: the refresh pass needs a session scoped to its own
+        transaction, not the caller's per-request session. The admin and
+        read paths (e.g. ``disable_claude_account``, ``find_accounts_due_for_rotation``)
+        continue to use ``self._repo``.
         """
         if self._oauth_client is None:
             raise ClaudeAuthError("no OAuth client configured")
 
-        # Acquire the cross-process lock before decrypting the refresh
-        # token. Decryption itself is cheap, but acquiring the lock first
-        # means a second caller that is already blocked on the lock will
-        # not see the in-flight token material until commit.
-        session = self._resolve_repo_session()
-        if session is not None and session.get_bind().dialect.name == "postgresql":
-            await _acquire_postgresql_claude_refresh_lock(session, account.id)
-        elif session is None:
-            logger.debug(
-                "claude.refresh.single_process_lock_only account_id=%s "
-                "(no SQLAlchemy session attached to repo; relying on in-process singleflight)",
-                account.id,
-            )
-
         refresh_token = self._encryptor.decrypt(refresh_token_bytes)
-        try:
-            result = await self._oauth_client.refresh(refresh_token)
-        except ClaudeAuthError as exc:
-            await self._deactivate_for_invalid_grant(account, exc)
-            self._record_metric("invalid_grant")
-            return None
-        except ClaudeUpstreamError:
-            self._record_metric("error")
-            raise
 
-        # Defensive: Anthropic always rotates the refresh token, but the public
-        # contract does not forbid omission. A `None` refresh token cannot be
-        # silently coerced to the previous value because Anthropic's single-use
-        # refresh-token rotation would 400 with `invalid_grant` on the next
-        # refresh attempt. Deactivate explicitly so the operator re-authorizes.
-        if result.refresh_token is None:
-            await self._persist_rotated_credentials(account, result)
-            await self._deactivate_for_missing_refresh_token(account)
-            self._record_metric("invalid_grant")
-            return None
+        async with self._session_factory() as session:
+            dialect = session.get_bind().dialect.name
+            if dialect == "postgresql":
+                # Acquire the lock BEFORE decrypting the refresh token. A
+                # second caller that is already blocked on the lock will
+                # not see the in-flight token material until commit.
+                await _acquire_postgresql_claude_refresh_lock(session, account.id)
+            else:
+                logger.debug(
+                    "claude.refresh.single_process_lock_only account_id=%s dialect=%s",
+                    account.id,
+                    dialect,
+                )
 
-        await self._persist_rotated_credentials(account, result)
-        self._record_metric("success")
-        return result
+            scoped_repo = self._scoped_repo_factory(session)
+            try:
+                result = await self._oauth_client.refresh(refresh_token)
+            except ClaudeAuthError as exc:
+                await self._deactivate_for_invalid_grant(scoped_repo, account, exc)
+                self._record_metric("invalid_grant")
+                return None
+            except ClaudeUpstreamError:
+                self._record_metric("error")
+                raise
 
-    def _resolve_repo_session(self) -> AsyncSession | None:
-        """Return the SQLAlchemy session backing ``self._repo`` if available.
+            # Defensive: Anthropic always rotates the refresh token, but the public
+            # contract does not forbid omission. A `None` refresh token cannot be
+            # silently coerced to the previous value because Anthropic's single-use
+            # refresh-token rotation would 400 with `invalid_grant` on the next
+            # refresh attempt. Deactivate explicitly so the operator re-authorizes.
+            if result.refresh_token is None:
+                await self._persist_rotated_credentials(scoped_repo, account, result)
+                await self._deactivate_for_missing_refresh_token(scoped_repo, account, result.raw_body)
+                self._record_metric("invalid_grant")
+                return None
 
-        The repo port is duck-typed (see :class:`ClaudeAccountRepository`
-        Protocol); some test stubs do not expose a ``_session`` attribute.
-        This helper returns ``None`` in those cases so the caller can fall
-        back to the in-process singleflight alone.
-        """
-        return getattr(self._repo, "_session", None)
+            await self._persist_rotated_credentials(scoped_repo, account, result)
+            self._record_metric("success")
+            return result
+        # ``self._session_factory`` is expected to commit on success and
+        # roll back on exception; the production ``get_background_session``
+        # is wrapped by :func:`_claude_refresh_session` to guarantee this.
 
-    async def _deactivate_for_invalid_grant(self, account: Account, error: ClaudeAuthError) -> None:
+    async def _deactivate_for_invalid_grant(
+        self,
+        repo: ClaudeAccountRepository,
+        account: Account,
+        error: ClaudeAuthError,
+    ) -> None:
         """Mark the account DEACTIVATED for ``invalid_grant`` and emit the
         structured log required by the spec.
         """
@@ -407,15 +462,22 @@ class ClaudeAuthManager:
                 "error": str(error),
             },
         )
-        await self._repo.deactivate(account.id, reason=reason)
+        await repo.deactivate(account.id, reason=reason)
 
-    async def _deactivate_for_missing_refresh_token(self, account: Account) -> None:
+    async def _deactivate_for_missing_refresh_token(
+        self,
+        repo: ClaudeAccountRepository,
+        account: Account,
+        body_excerpt: str | bytes | None,
+    ) -> None:
         """Mark the account DEACTIVATED when Anthropic omits the new refresh token.
 
         Emits the structured ``claude.refresh.refresh_token_missing`` log line
         required by the spec so the operator can re-authorize. The deactivate
         reason is the typed ``refresh_token_missing:`` prefix so dashboards can
-        filter on it independently of ``invalid_grant``.
+        filter on it independently of ``invalid_grant``. ``body_excerpt`` is
+        the OAuth refresh response body so the log carries the "original
+        message body excerpt" the spec requires.
         """
         message = "Anthropic refresh response omitted refresh_token"
         logger.warning(
@@ -424,14 +486,20 @@ class ClaudeAuthManager:
                 "event": "claude.refresh.refresh_token_missing",
                 "account_id": account.id,
                 "severity": "warning",
+                "body_excerpt": _format_body_excerpt(body_excerpt),
             },
         )
-        await self._repo.deactivate(
+        await repo.deactivate(
             account.id,
             reason=f"refresh_token_missing:{message}",
         )
 
-    async def _persist_rotated_credentials(self, account: Account, result: ClaudeRefreshResult) -> None:
+    async def _persist_rotated_credentials(
+        self,
+        repo: ClaudeAccountRepository,
+        account: Account,
+        result: ClaudeRefreshResult,
+    ) -> None:
         """Persist rotated credentials for the given ``account``.
 
         Unconditional rotation: the new ``access_token`` always overwrites
@@ -453,7 +521,7 @@ class ClaudeAuthManager:
         if result.refresh_token is not None:
             new_refresh = self._encryptor.encrypt(result.refresh_token)
 
-        await self._repo.update_tokens(
+        await repo.update_tokens(
             account_id=account.id,
             access_token_encrypted=new_access,
             refresh_token_encrypted=new_refresh,
@@ -485,6 +553,29 @@ def _serialize_scopes(scopes: list[str] | None) -> str | None:
     if scopes is None:
         return None
     return json.dumps(scopes)
+
+
+_BODY_EXCERPT_MAX_CHARS = 512
+
+
+def _format_body_excerpt(body: str | bytes | None) -> str | None:
+    """Render the OAuth response body excerpt for structured logs.
+
+    Returns ``None`` for ``None`` input so logs can record "no body
+    available" via the absence of the field. Bytes are decoded as UTF-8
+    with ``errors="replace"`` so a malformed payload never crashes the
+    log path. Output is truncated to ``_BODY_EXCERPT_MAX_CHARS`` to
+    bound the log line size; truncation is annotated with an ellipsis.
+    """
+    if body is None:
+        return None
+    if isinstance(body, (bytes, bytearray)):
+        text = bytes(body).decode("utf-8", errors="replace")
+    else:
+        text = str(body)
+    if len(text) > _BODY_EXCERPT_MAX_CHARS:
+        return text[:_BODY_EXCERPT_MAX_CHARS] + "…"
+    return text
 
 
 def _deserialize_scopes(raw: str | None) -> list[str] | None:

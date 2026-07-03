@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -195,6 +196,99 @@ class _FakeOAuthClient:
 # ---------------------------------------------------------------------------
 
 
+class _FakeBind:
+    """SQLAlchemy ``Bind``-shaped stand-in reporting ``dialect.name``."""
+
+    def __init__(self, name: str = "sqlite") -> None:
+        self.dialect = type("D", (), {"name": name})()
+
+
+class _RecordingSession:
+    """Minimal async-session stand-in for the refresh-pass tests.
+
+    Records every ``execute`` call (so the advisory-lock test can assert
+    on the SQL it observed), exposes the dialect of its bind (so the
+    manager's ``pg_advisory_xact_lock`` branch is exercised when
+    ``dialect_name="postgresql"`` and skipped when ``"sqlite"``), and
+    tracks ``commit`` / ``rollback`` so success and error-path contracts
+    can be asserted.
+    """
+
+    def __init__(self, *, dialect_name: str = "sqlite") -> None:
+        self.executed: list[tuple[Any, dict[str, Any]]] = []
+        self.bind = _FakeBind(dialect_name)
+        self.committed = False
+        self.rolled_back = False
+
+    def get_bind(self) -> _FakeBind:
+        return self.bind
+
+    async def execute(self, statement: Any, params: dict[str, Any] | None = None) -> Any:
+        text_sql = getattr(statement, "text", str(statement))
+        self.executed.append((text_sql, params or {}))
+        return None
+
+    async def commit(self) -> None:
+        self.committed = True
+
+    async def rollback(self) -> None:
+        self.rolled_back = True
+
+
+def _make_session_factory(session: _RecordingSession):
+    """Return an async-context-manager factory yielding ``session``.
+
+    Mirrors :func:`app.db.session._claude_refresh_session` semantics: the
+    session commits on the success path and rolls back on exception. The
+    ``_RecordingSession`` tracks both events so tests can assert on the
+    lifecycle.
+    """
+
+    @asynccontextmanager
+    async def _factory():
+        try:
+            yield session
+            await session.commit()
+        except BaseException:
+            if not session.rolled_back:
+                await session.rollback()
+            raise
+
+    return _factory
+
+
+def _rotate_manager(
+    *,
+    repo: _FakeRepo,
+    encryptor: _FakeEncryptor,
+    oauth_client: Any,
+    session: _RecordingSession | None = None,
+    sql_repo: Any | None = None,
+) -> tuple[ClaudeAuthManager, _RecordingSession]:
+    """Build a ``ClaudeAuthManager`` configured for the refresh-pass tests.
+
+    The returned manager:
+
+    - uses ``session_factory`` opening a ``_RecordingSession`` (or the one
+      passed in) so the advisory-lock branch and commit/rollback can be
+      asserted on without a real database;
+    - uses ``scoped_repo_factory`` returning ``sql_repo`` (defaulting to
+      ``repo`` itself) so the per-pass writes land on the recording
+      ``_FakeRepo`` instance the test already inspects.
+    """
+    record_session = session if session is not None else _RecordingSession()
+    return (
+        ClaudeAuthManager(
+            repo=repo,
+            encryptor=encryptor,
+            oauth_client=oauth_client,
+            session_factory=_make_session_factory(record_session),
+            scoped_repo_factory=lambda _session: sql_repo if sql_repo is not None else repo,
+        ),
+        record_session,
+    )
+
+
 @pytest.fixture(autouse=True)
 def _reset_singleflight():
     clear_claude_refresh_singleflight_state()
@@ -368,7 +462,7 @@ async def test_rotate_claude_access_token_persists_new_tokens(
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+    manager, _session = _rotate_manager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     result = await manager.rotate_claude_access_token(account)
 
@@ -398,7 +492,7 @@ async def test_rotate_with_missing_refresh_token_drops_existing_and_deactivates(
     original_rt = account.claude_refresh_token_encrypted
     oauth = _FakeOAuthClient()
     oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token=None, expires_in=3600)
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+    manager, _session = _rotate_manager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     with caplog.at_level(logging.WARNING, logger="app.modules.claude.auth_manager"):
         result = await manager.rotate_claude_access_token(account)
@@ -425,7 +519,7 @@ async def test_rotate_invalid_grant_disables_account(fake_repo: _FakeRepo, fake_
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_error = ClaudeAuthError("invalid_grant")
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+    manager, _session = _rotate_manager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     result = await manager.rotate_claude_access_token(account)
 
@@ -452,7 +546,7 @@ async def test_rotate_upstream_error_raises_and_does_not_disable(
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_error = ClaudeUpstreamError("upstream 503")
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+    manager, _session = _rotate_manager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     with pytest.raises(ClaudeUpstreamError):
         await manager.rotate_claude_access_token(account)
@@ -486,7 +580,7 @@ async def test_rotate_concurrent_calls_coalesce_to_single_oauth_request(
             return ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
     oauth = _SlowOAuth()
-    manager = ClaudeAuthManager(
+    manager, _session = _rotate_manager(
         repo=fake_repo,
         encryptor=fake_encryptor,
         oauth_client=oauth,  # type: ignore[arg-type]
@@ -541,7 +635,7 @@ async def test_rotate_different_accounts_run_independently(
             )
 
     oauth = _OA()
-    manager = ClaudeAuthManager(
+    manager, _session = _rotate_manager(
         repo=fake_repo,
         encryptor=fake_encryptor,
         oauth_client=oauth,  # type: ignore[arg-type]
@@ -581,7 +675,7 @@ async def test_rotate_unconditionally_refreshes(fake_repo: _FakeRepo, fake_encry
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+    manager, _session = _rotate_manager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     result = await manager.rotate_claude_access_token(account)
 
@@ -598,15 +692,20 @@ async def test_rotate_refresh_token_missing_deactivates_account(
     1. Persist the new access token and clear the refresh token slot to NULL.
     2. Deactivate the account with reason ``refresh_token_missing:<msg>``.
     3. Return ``None`` to the caller (matching the invalid_grant contract).
-    4. Emit a structured ``claude.refresh.refresh_token_missing`` log line.
+    4. Emit a structured ``claude.refresh.refresh_token_missing`` log line
+       that carries the "original message body excerpt" the spec mandates.
     """
     import logging
 
+    body_bytes = b'{"access_token":"AT_NEW","expires_in":3600}'
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
-    # Anthropic omits ``refresh_token`` from the response.
-    oauth.next_result = ClaudeRefreshResult(access_token="AT_NEW", refresh_token=None, expires_in=3600)
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+    # Anthropic omits ``refresh_token`` from the response; the OAuth client
+    # attaches the raw body so the auth manager can include it in the log.
+    oauth.next_result = ClaudeRefreshResult(
+        access_token="AT_NEW", refresh_token=None, expires_in=3600, raw_body=body_bytes
+    )
+    manager, _session = _rotate_manager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
 
     with caplog.at_level(logging.WARNING, logger="app.modules.claude.auth_manager"):
         result = await manager.rotate_claude_access_token(account)
@@ -621,63 +720,46 @@ async def test_rotate_refresh_token_missing_deactivates_account(
     deactivate = fake_repo.deactivate_calls[-1]
     assert deactivate[0] == account.id
     assert deactivate[1].startswith("refresh_token_missing:")
-    # Structured warning log was emitted.
+    # Structured warning log was emitted with the body excerpt.
     matching = [r for r in caplog.records if r.message == "claude.refresh.refresh_token_missing"]
     assert matching, "expected a structured 'claude.refresh.refresh_token_missing' WARNING log"
     record = matching[0]
     assert getattr(record, "event", None) == "claude.refresh.refresh_token_missing"
     assert record.levelno == logging.WARNING
+    excerpt = getattr(record, "body_excerpt", None)
+    assert isinstance(excerpt, str) and "AT_NEW" in excerpt, (
+        f"expected body_excerpt to contain the OAuth response body, got {excerpt!r}"
+    )
 
 
 @pytest.mark.asyncio
 async def test_rotate_acquires_postgres_advisory_lock_when_dialect_postgres(
     fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
 ) -> None:
-    """When the repo carries a Postgres-backed SQLAlchemy session, the manager
-    MUST acquire ``pg_advisory_xact_lock(hashtext('claude-refresh:{id}'))``
-    BEFORE decrypting the refresh token. Cross-replica serialization is the
-    spec-mandated guarantee; without it, two replicas can both rotate the
-    same account and invalidate each other's refresh tokens.
+    """When the refresh session is Postgres-backed, the manager MUST acquire
+    ``pg_advisory_xact_lock(hashtext('claude-refresh:{id}'))`` BEFORE
+    decrypting the refresh token. The session is provided via
+    ``session_factory`` (not via the injected ``repo``) so this test
+    exercises the path the lifespan wiring takes. The session MUST commit
+    on the success path so the writes are persisted and the lock releases.
     """
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
 
-    # Stand-in session that records the SQL it sees and reports Postgres dialect.
-    class _FakeBind:
-        dialect = type("D", (), {"name": "postgresql"})()
-
-    class _FakeSession:
-        def __init__(self) -> None:
-            self.executed: list[tuple[str, dict]] = []
-            self.bind = _FakeBind()
-
-        def get_bind(self):
-            return self.bind
-
-        async def execute(self, statement, params=None):
-            text_sql = getattr(statement, "text", str(statement))
-            self.executed.append((text_sql, params or {}))
-
-    fake_session = _FakeSession()
-
-    class _RepoWithSession(_FakeRepo):
-        # The manager reads ``_session`` via ``getattr(self._repo, '_session', None)``
-        # so we expose the fake session under that attribute.
-        pass
-
-    repo = _RepoWithSession()
-    repo._session = fake_session  # type: ignore[attr-defined]
-
-    manager = ClaudeAuthManager(repo=repo, encryptor=fake_encryptor, oauth_client=oauth)
+    record_session = _RecordingSession(dialect_name="postgresql")
+    manager, _ = _rotate_manager(
+        repo=fake_repo,
+        encryptor=fake_encryptor,
+        oauth_client=oauth,
+        session=record_session,
+    )
 
     result = await manager.rotate_claude_access_token(account)
 
     assert result is not None
-    # The first SQL executed MUST be the advisory lock acquisition with the
-    # canonical scope string. Subsequent statements are the OAuth refresh
-    # persist path.
-    lock_statements = [(sql, params) for sql, params in fake_session.executed if "pg_advisory_xact_lock" in sql]
+    assert record_session.committed, "session MUST commit on the success path"
+    lock_statements = [(sql, params) for sql, params in record_session.executed if "pg_advisory_xact_lock" in sql]
     assert lock_statements, "expected pg_advisory_xact_lock to be acquired"
     sql, params = lock_statements[0]
     assert "hashtext" in sql
@@ -685,21 +767,31 @@ async def test_rotate_acquires_postgres_advisory_lock_when_dialect_postgres(
 
 
 @pytest.mark.asyncio
-async def test_rotate_skips_advisory_lock_when_session_missing(
+async def test_rotate_skips_advisory_lock_on_non_postgres_dialect(
     fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
 ) -> None:
-    """When the repo does NOT expose a session (test stubs, contract-only
-    callers), the manager MUST fall back to the in-process singleflight
-    alone. This is the SQLite / dev-mode path.
+    """On non-Postgres dialects (SQLite, dev-mode) the in-process
+    singleflight alone is sufficient and the advisory lock is skipped.
+    The session MUST still commit on the success path so the writes
+    are persisted.
     """
     account = fake_repo.seed(account_id="claude-abc-123")
     oauth = _FakeOAuthClient()
     oauth.next_result = ClaudeRefreshResult(access_token="AT2", refresh_token="RT2", expires_in=3600)
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, oauth_client=oauth)
+    record_session = _RecordingSession(dialect_name="sqlite")
+    manager, _ = _rotate_manager(
+        repo=fake_repo,
+        encryptor=fake_encryptor,
+        oauth_client=oauth,
+        session=record_session,
+    )
 
     result = await manager.rotate_claude_access_token(account)
 
     assert result is not None
+    assert record_session.committed, "session MUST commit on the success path"
+    lock_statements = [(sql, params) for sql, params in record_session.executed if "pg_advisory_xact_lock" in sql]
+    assert not lock_statements, "pg_advisory_xact_lock MUST NOT be issued on non-Postgres dialects"
     assert len(oauth.refresh_calls) == 1
 
 
