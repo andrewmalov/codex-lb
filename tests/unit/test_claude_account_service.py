@@ -74,6 +74,34 @@ class _FakeRepo:
         self.activate_calls: list[str] = []
         self.find_due_calls: list[int] = []
         self.list_accounts_calls: int = 0
+        self.get_by_id_calls: list[str] = []
+
+    async def get_by_id(self, account_id: str) -> Account | None:
+        """Stub matching :meth:`ClaudeAccountRepository.get_by_id`.
+
+        The refresh pass re-encrypts the refresh token against the canonical
+        SQLAlchemy instance returned by this method. The in-memory fake
+        round-trips a minimal ``Account`` so the auth manager's structural
+        contract (the protocol signature) is satisfied; the production
+        ``SqlClaudeAccountRepository`` is exercised separately in
+        ``tests/integration/test_repositories.py``.
+        """
+        self.get_by_id_calls.append(account_id)
+        row = self.persisted.get(account_id)
+        if row is None:
+            return None
+        # ``Account.__init__`` takes the SQLAlchemy defaults; the fixture
+        # below only needs to satisfy the protocol's return type.
+        return Account(
+            id=account_id,
+            provider=row.get("provider", "claude"),
+            access_token_encrypted=row.get("claude_access_token_encrypted", b""),
+            refresh_token_encrypted=row.get("refresh_token_encrypted", b""),
+            id_token_encrypted=b"",
+            last_refresh=datetime.now(timezone.utc),
+            claude_account_uuid=row.get("claude_account_uuid", account_id.removeprefix("claude-")),
+            claude_refresh_token_encrypted=row.get("claude_refresh_token_encrypted", b""),
+        )
 
     async def exists_by_claude_uuid(self, claude_uuid: str) -> bool:
         return self.exists_uuid or any(
