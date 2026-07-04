@@ -370,7 +370,7 @@ class ClaudeAuthManager:
 
         result = await _CLAUDE_REFRESH_SINGLEFLIGHT.run(
             account.id,
-            factory=lambda: self._run_refresh(account, refresh_token_bytes),
+            factory=lambda: self._run_refresh(account, refresh_token_bytes),  # ty:ignore[invalid-argument-type]
         )
         return result
 

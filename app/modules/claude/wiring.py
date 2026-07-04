@@ -38,8 +38,8 @@ async def _proxy_repo_context_async():
             usage=UsageRepository(session),
             request_logs=RequestLogsRepository(session),
             sticky_sessions=StickySessionsRepository(session),
-            api_keys=None,  # type: ignore[arg-type]
-            additional_usage=None,  # type: ignore[arg-type]
+            api_keys=None,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
+            additional_usage=None,  # type: ignore[arg-type]  # ty:ignore[invalid-argument-type]
             quota_planner=None,  # type: ignore[arg-type]
         )
 
@@ -54,7 +54,7 @@ def build_claude_proxy_service() -> ClaudeProxyService:
     """
     settings = get_settings()
     chat = build_claude_chat_client(
-        session=None,
+        session=None,  # ty:ignore[invalid-argument-type]
         settings=settings,
         base_url=settings.claude_api_base_url,
     )
@@ -65,7 +65,7 @@ def build_claude_proxy_service() -> ClaudeProxyService:
     # actually issued — tests that never call out to the network can still
     # exercise this code path.
     chat._transport = AiohttpClaudeChatTransport(  # type: ignore[attr-defined]
-        _LazySession()
+        _LazySession()  # ty:ignore[invalid-argument-type]
     )
 
     load_balancer = LoadBalancer(repo_factory=_proxy_repo_context_async)
@@ -126,7 +126,7 @@ class _LazyAccountsRepository:
         from app.modules.accounts.repository import AccountsRepository
 
         async with get_background_session() as session:
-            return await AccountsRepository(session).update_last_used_at(*args, **kwargs)
+            return await AccountsRepository(session).update_last_used_at(*args, **kwargs)  # ty:ignore[unresolved-attribute]
 
 
 class _LazyRequestLogsRepository:

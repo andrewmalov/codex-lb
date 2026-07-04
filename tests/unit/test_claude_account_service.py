@@ -308,7 +308,7 @@ def _rotate_manager(
     return (
         ClaudeAuthManager(
             repo=repo,
-            encryptor=encryptor,
+            encryptor=encryptor,  # ty:ignore[invalid-argument-type]
             oauth_client=oauth_client,
             session_factory=_make_session_factory(record_session),
             scoped_repo_factory=lambda _session: sql_repo if sql_repo is not None else repo,
@@ -343,7 +343,7 @@ def fake_encryptor() -> _FakeEncryptor:
 async def test_add_claude_account_persists_encrypted_tokens(
     fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
 ) -> None:
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)  # ty:ignore[invalid-argument-type]
 
     account_id = await manager.add_claude_account(
         claude_account_uuid="abc-123",
@@ -389,7 +389,7 @@ async def test_add_claude_account_persists_encrypted_tokens(
 @pytest.mark.asyncio
 async def test_add_claude_account_sets_expiry_with_skew(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     """Expiry equals ``now + expires_in - skew`` (default 600s)."""
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, skew_seconds=600)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor, skew_seconds=600)  # ty:ignore[invalid-argument-type]
 
     before = datetime.now(timezone.utc)
     account_id = await manager.add_claude_account(
@@ -415,7 +415,7 @@ async def test_add_claude_account_sets_expiry_with_skew(fake_repo: _FakeRepo, fa
 @pytest.mark.asyncio
 async def test_add_claude_account_rejects_duplicate_uuid(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     fake_repo.exists_uuid = True
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)  # ty:ignore[invalid-argument-type]
 
     with pytest.raises(ClaudeAccountAlreadyExists) as exc_info:
         await manager.add_claude_account(
@@ -443,7 +443,7 @@ async def test_add_claude_account_uses_settings_skew_when_default(
 
     monkeypatch.setattr(auth_manager_module, "get_settings", lambda: _Settings())
 
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)  # ty:ignore[invalid-argument-type]
 
     before = datetime.now(timezone.utc)
     account_id = await manager.add_claude_account(
@@ -479,8 +479,8 @@ class _RefreshFactory:
         repo: _FakeRepo,
         encryptor: _FakeEncryptor,
         oauth_client: _FakeOAuthClient,
-    ) -> ClaudeAuthManager:
-        self.manager = ClaudeAuthManager(repo=repo, encryptor=encryptor, oauth_client=oauth_client)
+    ) -> ClaudeAuthManager:  # ty:ignore[invalid-return-type]
+        self.manager = ClaudeAuthManager(repo=repo, encryptor=encryptor, oauth_client=oauth_client)  # ty:ignore[invalid-argument-type]
 
 
 @pytest.mark.asyncio
@@ -831,7 +831,7 @@ async def test_rotate_skips_advisory_lock_on_non_postgres_dialect(
 @pytest.mark.asyncio
 async def test_disable_claude_account_sets_fields(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     account = fake_repo.seed(account_id="claude-abc-123")
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)  # ty:ignore[invalid-argument-type]
 
     ok = await manager.disable_claude_account(account, reason="manual")
 
@@ -845,7 +845,7 @@ async def test_disable_claude_account_sets_fields(fake_repo: _FakeRepo, fake_enc
 @pytest.mark.asyncio
 async def test_enable_claude_account_restores_fields(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     account = fake_repo.seed(account_id="claude-abc-123", disabled=True)
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)  # ty:ignore[invalid-argument-type]
 
     ok = await manager.enable_claude_account(account)
 
@@ -859,7 +859,7 @@ async def test_enable_claude_account_restores_fields(fake_repo: _FakeRepo, fake_
 @pytest.mark.asyncio
 async def test_disable_claude_account_is_idempotent(fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor) -> None:
     account = fake_repo.seed(account_id="claude-abc-123")
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)  # ty:ignore[invalid-argument-type]
 
     await manager.disable_claude_account(account, reason="first")
     await manager.disable_claude_account(account, reason="second")
@@ -875,7 +875,7 @@ async def test_enable_claude_account_no_op_when_already_enabled(
     fake_repo: _FakeRepo, fake_encryptor: _FakeEncryptor
 ) -> None:
     account = fake_repo.seed(account_id="claude-abc-123", disabled=False)
-    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)
+    manager = ClaudeAuthManager(repo=fake_repo, encryptor=fake_encryptor)  # ty:ignore[invalid-argument-type]
 
     ok = await manager.enable_claude_account(account)
 

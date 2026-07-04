@@ -441,7 +441,7 @@ def test_claude_schema_migration_round_trips_cleanly(tmp_path: Path) -> None:
 
     def _claude_indexes_present(connection: Connection) -> set[str]:
         inspector = inspect(connection)
-        return {index["name"] for index in inspector.get_indexes("accounts") if index.get("name") is not None}
+        return {index["name"] for index in inspector.get_indexes("accounts") if index.get("name") is not None}  # ty:ignore[invalid-return-type]
 
     def _claude_check_constraints(connection: Connection) -> set[str]:
         dialect = connection.dialect.name

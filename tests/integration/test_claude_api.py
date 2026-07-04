@@ -108,10 +108,10 @@ def stubbed_claude_service(app_instance):
     both proxy tests and admin tests.
     """
     stub = _StubProxyService()
-    stub.select_account = lambda *_a, **_kw: _StubAccount()  # type: ignore[attr-defined]
-    stub.record_error = lambda *_a, **_kw: None  # type: ignore[attr-defined]
-    stub.get_access_token = lambda _account: "AT"  # type: ignore[attr-defined]
-    stub.rotate_claude_access_token = lambda *_a, **_kw: None  # type: ignore[attr-defined]
+    stub.select_account = lambda *_a, **_kw: _StubAccount()  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    stub.record_error = lambda *_a, **_kw: None  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    stub.get_access_token = lambda _account: "AT"  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
+    stub.rotate_claude_access_token = lambda *_a, **_kw: None  # type: ignore[attr-defined]  # ty:ignore[unresolved-attribute]
     app_instance.state.claude_proxy_service = stub  # type: ignore[assignment]
     return stub
 

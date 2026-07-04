@@ -472,7 +472,7 @@ def _safe_account_alias(account: Account) -> str:
     alias = (account.alias or "").strip()
     if alias:
         return alias[:64]
-    return _mask_email(account.email)
+    return _mask_email(account.email)  # ty:ignore[invalid-argument-type]
 
 
 def _mask_email(email: str) -> str:
