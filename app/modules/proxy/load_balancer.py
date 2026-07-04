@@ -862,8 +862,8 @@ class LoadBalancer:
                     )
                     await self._selection_inputs_cache.set(
                         _clone_selection_inputs(selection_inputs),
-                        key=cache_key,
-                        generation=load_generation,  # ty:ignore[invalid-argument-type]
+                        key=cache_key,  # ty:ignore[invalid-argument-type]
+                        generation=load_generation,
                     )
                     return selection_inputs
                 if not pre_model_filter_accounts:
@@ -877,8 +877,8 @@ class LoadBalancer:
                     )
                     await self._selection_inputs_cache.set(
                         _clone_selection_inputs(selection_inputs),
-                        key=cache_key,
-                        generation=load_generation,  # ty:ignore[invalid-argument-type]
+                        key=cache_key,  # ty:ignore[invalid-argument-type]
+                        generation=load_generation,
                     )
                     return selection_inputs
                 selection_inputs = _SelectionInputs(
@@ -893,8 +893,8 @@ class LoadBalancer:
                 )
                 await self._selection_inputs_cache.set(
                     _clone_selection_inputs(selection_inputs),
-                    key=cache_key,
-                    generation=load_generation,  # ty:ignore[invalid-argument-type]
+                    key=cache_key,  # ty:ignore[invalid-argument-type]
+                    generation=load_generation,
                 )
                 return selection_inputs
 
@@ -920,8 +920,8 @@ class LoadBalancer:
                     )
                     await self._selection_inputs_cache.set(
                         _clone_selection_inputs(selection_inputs),
-                        key=cache_key,
-                        generation=load_generation,  # ty:ignore[invalid-argument-type]
+                        key=cache_key,  # ty:ignore[invalid-argument-type]
+                        generation=load_generation,
                     )
                     return selection_inputs
             if not accounts:
@@ -935,8 +935,8 @@ class LoadBalancer:
                 )
                 await self._selection_inputs_cache.set(
                     _clone_selection_inputs(selection_inputs),
-                    key=cache_key,
-                    generation=load_generation,  # ty:ignore[invalid-argument-type]
+                    key=cache_key,  # ty:ignore[invalid-argument-type]
+                    generation=load_generation,
                 )
                 return selection_inputs
 
@@ -996,8 +996,8 @@ class LoadBalancer:
             )
             await self._selection_inputs_cache.set(
                 _clone_selection_inputs(selection_inputs),
-                key=cache_key,
-                generation=load_generation,  # ty:ignore[invalid-argument-type]
+                key=cache_key,  # ty:ignore[invalid-argument-type]
+                generation=load_generation,
             )
             return selection_inputs
 
