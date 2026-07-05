@@ -118,6 +118,12 @@ jobs:
     name: Publish to PyPI
     needs: [build]
     runs-on: ubuntu-24.04
+    # PyPI trusted publishing is configured only for the upstream repo
+    # (`Soju06/codex-lb`). Forks inherit the OIDC `pypi` environment but
+    # are not registered as PyPI trusted publishers, so attempting to
+    # publish from a fork fails with a 403 and would otherwise trigger
+    # `withdraw-failed-release` to demote the GitHub Release to draft.
+    if: github.event.repository.fork == false
 
     permissions:
       id-token: write
@@ -251,6 +257,22 @@ jobs:
               --username "${REGISTRY_USERNAME}" \
               --password-stdin
 
+      - name: Set chart image.repository to this repository owner
+        shell: bash
+        env:
+          OWNER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          OWNER_LC="$(printf '%s' "${OWNER}" | tr '[:upper:]' '[:lower:]')"
+          chart_values="deploy/helm/codex-lb/values.yaml"
+          if grep -Eq '^[[:space:]]+repository:[[:space:]]+soju06/codex-lb[[:space:]]*$' "${chart_values}"; then
+            sed -i.bak -E "s|^([[:space:]]+repository:[[:space:]]+)soju06/codex-lb[[:space:]]*$|\1${OWNER_LC}/codex-lb|" "${chart_values}"
+            rm -f "${chart_values}.bak"
+            echo "Updated ${chart_values} image.repository to ${OWNER_LC}/codex-lb"
+          else
+            echo "::warning::Expected image.repository line not found in ${chart_values}; chart will keep its current default."
+          fi
+
       - name: Package Helm chart
         run: |
           mkdir -p .helm-pkg
@@ -366,11 +388,11 @@ jobs:
             if [ "${IS_PRERELEASE}" = "true" ]; then
               echo "uvx --from \"codex-lb==${PYPI_VERSION}\" codex-lb"
               echo "docker pull ghcr.io/${GITHUB_REPOSITORY}:${TAG_VERSION}"
-              echo "helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb --version ${TAG_VERSION} --devel"
+              echo "helm install codex-lb oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/codex-lb --version ${TAG_VERSION} --devel"
             else
               echo 'uvx codex-lb'
               echo "docker pull ghcr.io/${GITHUB_REPOSITORY}:${TAG_VERSION}"
-              echo "helm install codex-lb oci://ghcr.io/soju06/charts/codex-lb --version ${TAG_VERSION}"
+              echo "helm install codex-lb oci://ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/charts/codex-lb --version ${TAG_VERSION}"
             fi
             echo '```'
           } >> release_notes.md
