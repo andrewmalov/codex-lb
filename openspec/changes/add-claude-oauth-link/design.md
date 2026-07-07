@@ -155,7 +155,10 @@ Key invariants:
 
 - One non-terminal flow at a time (per process). New `/start` transitions any existing
   pending flow to `error: superseded`.
-- Pending flows expire after `claude_oauth_flow_ttl_seconds` (default 600s).
+- Pending flows are considered expired lazily on access. A pending flow is expired when
+  `started_at + claude_oauth_flow_ttl_seconds < now()` at the moment a status or
+  callback request is processed. No background sweeper task is required; an idle flow
+  past its TTL stays in memory as `pending` until the next access.
 - Terminal states are retained for at least one status poll so the dashboard can display
   the final result after a page refresh.
 - Multi-replica caveat: the state store is process-local. If `/start` lands on replica A

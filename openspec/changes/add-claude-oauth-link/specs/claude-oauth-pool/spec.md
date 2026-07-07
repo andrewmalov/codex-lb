@@ -17,7 +17,7 @@ The system SHALL expose `POST /api/claude/oauth/start`, `GET /api/claude/oauth/s
 - Reject the callback when the `code` is empty (HTTP 400, `error_code: missing_code`).
 - Reject a duplicate `claude_account_uuid` with HTTP 409 (`error_code: account_already_exists`).
 - Support at most one in-flight flow at a time. A new `POST /api/claude/oauth/start` SHALL transition any prior `pending` flow to `error` with `error_code: superseded`, and SHALL create a new flow with a fresh state token and PKCE pair.
-- Expire pending flows after `claude_oauth_flow_ttl_seconds` (default 600s). Past that point the callback SHALL return HTTP 410 (`error_code: flow_expired`) and the status endpoint SHALL report the terminal state.
+- Consider a pending flow expired when `started_at + claude_oauth_flow_ttl_seconds < now()` at the moment of a status or callback request (lazy evaluation; no background sweeper task is required). Past that point the callback SHALL return HTTP 410 (`error_code: flow_expired`) and the status endpoint SHALL report `status: error` with `error_code: flow_expired`.
 - Surface Anthropic token-exchange errors (HTTP 400 `invalid_grant`, 5xx) as HTTP 502 with the original error code preserved (`invalid_grant`, `anthropic_unreachable`).
 - Never log `access_token`, `refresh_token`, `id_token`, `code`, `code_verifier`, or `state` in plaintext.
 
@@ -77,6 +77,22 @@ The system SHALL expose `POST /api/claude/oauth/start`, `GET /api/claude/oauth/s
 
 - **WHEN** admin posts a callback with a `flow_id` that does not exist (or that was superseded)
 - **THEN** the system returns 404 with `error_code: flow_not_found`
+
+#### Scenario: Flow not pending
+
+- **GIVEN** a flow is in status `success` or `error`
+- **WHEN** admin posts a callback for that flow
+- **THEN** the system returns 409 with `error_code: flow_not_pending`
+
+#### Scenario: Status lookup for unknown flow
+
+- **WHEN** admin calls `GET /api/claude/oauth/status?flowId={id}` with a `flow_id` that does not exist
+- **THEN** the system returns 404 with `error_code: flow_not_found`
+
+#### Scenario: Empty code or state
+
+- **WHEN** admin posts a callback with an empty `code` or empty `state`
+- **THEN** the system returns 400 (Pydantic validation rejects before the service is invoked)
 
 #### Scenario: No plaintext tokens in logs
 
