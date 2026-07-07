@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, AsyncIterator
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth.dependencies import (
@@ -25,6 +25,7 @@ from app.core.auth.dependencies import (
     set_dashboard_error_format,
     validate_dashboard_session,
 )
+from app.core.config.settings import get_settings
 from app.db.session import get_session
 from app.modules.claude.auth_manager import ClaudeAuthManager
 from app.modules.claude.oauth.schemas import (
@@ -33,7 +34,7 @@ from app.modules.claude.oauth.schemas import (
     ClaudeOauthStartResponse,
     ClaudeOauthStatusResponse,
 )
-from app.modules.claude.oauth.service import ClaudeOAuthService, ClaudeOauthFlowError
+from app.modules.claude.oauth.service import ClaudeOauthFlowError, ClaudeOAuthService
 from app.modules.claude.repository import SqlClaudeAccountRepository
 
 logger = logging.getLogger(__name__)
@@ -51,33 +52,37 @@ router = APIRouter(
 
 
 async def get_claude_oauth_service(
+    request: Request,
     session: AsyncSession = Depends(get_session),
 ) -> AsyncIterator[ClaudeOAuthService]:
     """Build the default service for a request.
 
-    Tasks 7 wires the lifespan-provided ``ClaudeOAuthClient`` (via a real
-    transport). For this task we use a placeholder transport that surfaces
-    only what the service needs; tests monkeypatch this dependency.
-    """
-    from app.core.clients.anthropic.oauth import ClaudeOAuthClient
-    from app.core.config.settings import get_settings
+    Reuses the lifespan-provided :class:`ClaudeOAuthClient` (built by
+    :func:`app.modules.claude.wiring.build_claude_oauth_client`) and the
+    request-scoped ``SqlClaudeAccountRepository`` so callback persistence
+    commits within the request transaction.
 
+    Raises :class:`RuntimeError` when the lifespan has not configured the
+    client — that is a wiring bug, not a runtime fallback. Tests override
+    this dependency directly via ``app.dependency_overrides``.
+    """
     settings = get_settings()
     repo = SqlClaudeAccountRepository(session)
-    # NOTE: the lifespan-provided real ``ClaudeOAuthClient`` is wired in Task 7.
-    # For this task the dependency seam is intentionally a stub so tests can
-    # monkeypatch ``get_claude_oauth_service`` cleanly. Production must
-    # replace this with the real client from ``app.state.claude_oauth_client``
-    # (see Task 7 in the implementation plan).
-    class _PlaceholderTransport:
-        async def post(self, url: str, *, json: dict, headers: dict):  # pragma: no cover - unreachable in task 5
-            raise NotImplementedError("claude_oauth_client must be wired in app.state (Task 7)")
 
-    client = ClaudeOAuthClient(transport=_PlaceholderTransport(), settings=settings)
+    oauth_client = getattr(request.app.state, "claude_oauth_client", None)
+    if oauth_client is None:
+        # Lifespan did not provide a client. Fail loudly so this is fixed in
+        # tests / production setup, not silently fall back to a placeholder.
+        raise RuntimeError(
+            "claude_oauth_client is not configured on app.state. "
+            "Ensure app_lifespan creates a ClaudeOAuthClient "
+            "(see app/modules/claude/wiring.py::build_claude_oauth_client)."
+        )
+
     manager = ClaudeAuthManager(repo=repo)
     yield ClaudeOAuthService(
         settings=settings,
-        oauth_client=client,
+        oauth_client=oauth_client,
         auth_manager=manager,
         accounts_repo=repo,
     )
