@@ -97,6 +97,7 @@ def stubbed_oauth_transport(app_instance):
     """
     from app.core.clients.anthropic.oauth import ClaudeOAuthClient
     from app.core.config.settings import get_settings
+    from app.db.session import get_session
     from app.modules.claude.auth_manager import ClaudeAuthManager
     from app.modules.claude.oauth import api as oauth_api_module
     from app.modules.claude.oauth.service import (
@@ -104,7 +105,6 @@ def stubbed_oauth_transport(app_instance):
         _FlowStore,
     )
     from app.modules.claude.repository import SqlClaudeAccountRepository
-    from app.db.session import get_session
 
     transport = _StubOAuthTransport(
         _StubResponse(
