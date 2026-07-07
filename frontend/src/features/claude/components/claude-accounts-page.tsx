@@ -1,3 +1,4 @@
+import { useQueryClient } from "@tanstack/react-query";
 import { Plus } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -7,14 +8,18 @@ import { Button } from "@/components/ui/button";
 import { useDialogState } from "@/hooks/use-dialog-state";
 import { useAuthStore } from "@/features/auth/hooks/use-auth";
 import { AddClaudeAccountDialog } from "@/features/claude/components/add-claude-account-dialog";
+import { AddClaudeAccountOAuthDialog } from "@/features/claude/components/add-claude-account-oauth-dialog";
 import { ClaudeAccountList } from "@/features/claude/components/claude-account-list";
 import { ClaudeAccountUsageCard } from "@/features/claude/components/claude-account-usage-card";
 import { useClaudeAccounts } from "@/features/claude/hooks/use-claude-accounts";
 import { getErrorMessageOrNull } from "@/utils/errors";
 
+const CLAUDE_ACCOUNTS_QUERY_KEY = ["claude-accounts", "list"] as const;
+
 export function ClaudeAccountsPage() {
   const { t } = useTranslation();
   const canWrite = useAuthStore((state) => state.canWrite);
+  const queryClient = useQueryClient();
   const {
     accountsQuery,
     addMutation,
@@ -22,6 +27,7 @@ export function ClaudeAccountsPage() {
     enableMutation,
   } = useClaudeAccounts();
   const addDialog = useDialogState();
+  const oauthDialog = useDialogState();
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
 
   const accounts = accountsQuery.data ?? [];
@@ -48,17 +54,31 @@ export function ClaudeAccountsPage() {
             {t("claude.addDialog.description")}
           </p>
         </div>
-        <Button
-          type="button"
-          size="sm"
-          className="h-8 text-xs"
-          onClick={() => addDialog.show()}
-          disabled={!canWrite || busy}
-          data-testid="add-claude-account-button"
-        >
-          <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
-          {t("claude.addButton")}
-        </Button>
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs"
+            onClick={() => oauthDialog.show()}
+            disabled={!canWrite || busy}
+            data-testid="add-claude-account-oauth-button"
+          >
+            <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            {t("claude.oauth.add.button")}
+          </Button>
+          <Button
+            type="button"
+            size="sm"
+            className="h-8 text-xs"
+            onClick={() => addDialog.show()}
+            disabled={!canWrite || busy}
+            data-testid="add-claude-account-button"
+          >
+            <Plus className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
+            {t("claude.addButton")}
+          </Button>
+        </div>
       </div>
 
       {mutationError ? (
@@ -104,6 +124,17 @@ export function ClaudeAccountsPage() {
         onOpenChange={addDialog.onOpenChange}
         onSubmit={async (payload) => {
           await addMutation.mutateAsync(payload);
+        }}
+      />
+
+      <AddClaudeAccountOAuthDialog
+        open={oauthDialog.open}
+        onOpenChange={oauthDialog.onOpenChange}
+        onSuccess={() => {
+          // OAuth persists the account server-side; mirror the manual path by
+          // invalidating the same query key used by useClaudeAccounts so the
+          // list refreshes without going through the manual addMutation.
+          void queryClient.invalidateQueries({ queryKey: CLAUDE_ACCOUNTS_QUERY_KEY });
         }}
       />
     </div>

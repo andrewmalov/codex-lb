@@ -451,6 +451,42 @@
       "added": "Claude account added",
       "disabled": "Claude account disabled",
       "enabled": "Claude account enabled"
+    },
+    "oauth": {
+      "add": {
+        "button": "Add Claude account via OAuth",
+        "manualLink": "Or paste tokens manually"
+      },
+      "step1": {
+        "title": "Step 1 — Open this URL and authorize",
+        "copy": "Copy URL",
+        "open": "Open in new tab"
+      },
+      "step2": {
+        "title": "Step 2 — Paste the authorization code",
+        "codeLabel": "Authorization code",
+        "codePlaceholder": "Paste the code from claude.ai here",
+        "stateLabel": "State (auto-filled)",
+        "submit": "Submit"
+      },
+      "step3": {
+        "title": "Account added"
+      },
+      "error": {
+        "title": "Could not add account",
+        "startOver": "Start over",
+        "id_token_missing": "Anthropic did not return an id_token. Please use the manual paste option.",
+        "id_token_claims_incomplete": "We could not extract account identity from the id_token. Please use the manual paste option.",
+        "id_token_malformed": "The id_token could not be parsed. Please use the manual paste option.",
+        "flow_expired": "This authorization request expired. Please start over.",
+        "flow_not_found": "Authorization request not found. Please start over.",
+        "flow_not_pending": "This flow has already completed.",
+        "state_mismatch": "The pasted state does not match. Please start over.",
+        "account_already_exists": "This Claude account is already in the pool.",
+        "invalid_grant": "The authorization code is invalid or already used. Please start over.",
+        "anthropic_unreachable": "Anthropic OAuth is unreachable. Try again in a moment.",
+        "generic": "An error occurred. Please try again."
+      }
     }
   }
 }
