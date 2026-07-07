@@ -50,6 +50,26 @@ class ClaudeRefreshResult:
     raw_body: bytes | None = None
 
 
+@dataclass(frozen=True)
+class ClaudeAuthorizationCodeResult:
+    """Result of a successful authorization-code exchange.
+
+    ``id_token`` is ``None`` when Anthropic's token response omits it; the
+    downstream service treats the absence as a flow-level failure surfaced
+    via ``error_code="id_token_missing"`` (see claude-oauth-link design).
+
+    ``scope`` carries the raw space-separated string so callers can decide
+    how to normalize it. ``None`` when the response omits the field.
+    """
+
+    access_token: str
+    refresh_token: str
+    id_token: str | None
+    expires_in: int
+    scope: str | None
+    raw_body: bytes | None = None
+
+
 class ClaudeOAuthTransport(Protocol):
     """Minimal async POST transport.
 
@@ -124,6 +144,56 @@ class ClaudeOAuthClient:
 
         raise ClaudeAPIError(f"refresh failed {status}: {body!r}")
 
+    async def exchange_authorization_code(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        redirect_uri: str,
+    ) -> ClaudeAuthorizationCodeResult:
+        """Exchange an OAuth authorization code + PKCE verifier for tokens.
+
+        POSTs JSON to ``self._token_endpoint``. Mirrors :meth:`refresh` for
+        status and error semantics, with two differences specific to the
+        authorization-code flow:
+
+        - The request body carries ``code`` + ``code_verifier`` +
+          ``redirect_uri`` + ``grant_type=authorization_code`` + ``client_id``.
+        - A missing ``id_token`` is tolerated (``None``); the caller is
+          responsible for the ``id_token_missing`` flow-level error.
+        """
+        extras = dict(getattr(self._settings, "claude_oauth_extra_headers", None) or {})
+        resp = await self._transport.post(
+            self._token_endpoint,
+            json={
+                "grant_type": "authorization_code",
+                "code": code,
+                "code_verifier": code_verifier,
+                "client_id": self._client_id,
+                "redirect_uri": redirect_uri,
+            },
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                **extras,
+            },
+        )
+
+        status = int(getattr(resp, "status", 200))
+        body = await _extract_json(resp)
+        raw_body = await _extract_raw_body(resp)
+
+        if status == 200:
+            return _parse_exchange_success_body(body, raw_body=raw_body)
+
+        if status == 400 and isinstance(body, dict) and body.get("error") == "invalid_grant":
+            raise ClaudeAuthError(f"invalid_grant: {body!r}")
+
+        if 500 <= status < 600:
+            raise ClaudeUpstreamError(f"upstream {status}: {body!r}")
+
+        raise ClaudeAPIError(f"exchange failed {status}: {body!r}")
+
 
 def _parse_success_body(body: Any, *, raw_body: bytes | None = None) -> ClaudeRefreshResult:
     """Extract fields from a 200 refresh response.
@@ -151,6 +221,44 @@ def _parse_success_body(body: Any, *, raw_body: bytes | None = None) -> ClaudeRe
         access_token=access_token,
         refresh_token=refresh_token,
         expires_in=expires_in,
+        raw_body=raw_body,
+    )
+
+
+def _parse_exchange_success_body(body: Any, *, raw_body: bytes | None = None) -> ClaudeAuthorizationCodeResult:
+    """Parse a 200 authorization-code-exchange response.
+
+    Same error model as :func:`_parse_success_body` (used by ``refresh``),
+    but enforces ``refresh_token`` as required and treats ``id_token`` as
+    optional.
+    """
+    if not isinstance(body, dict):
+        raise ClaudeAPIError(f"malformed exchange response: {body!r}")
+    access_token = body.get("access_token")
+    refresh_token = body.get("refresh_token")
+    raw_expires = body.get("expires_in")
+    if not isinstance(access_token, str) or access_token == "":
+        raise ClaudeAPIError(f"missing access_token in exchange response: {body!r}")
+    if not isinstance(refresh_token, str) or refresh_token == "":
+        raise ClaudeAPIError(f"missing refresh_token in exchange response: {body!r}")
+    try:
+        expires_in = int(raw_expires)
+    except (TypeError, ValueError) as exc:
+        raise ClaudeAPIError(f"missing/invalid expires_in in exchange response: {body!r}") from exc
+
+    id_token = body.get("id_token")
+    if id_token is not None and not isinstance(id_token, str):
+        raise ClaudeAPIError(f"id_token must be string or null: {body!r}")
+    scope = body.get("scope")
+    if scope is not None and not isinstance(scope, str):
+        raise ClaudeAPIError(f"scope must be string or null: {body!r}")
+
+    return ClaudeAuthorizationCodeResult(
+        access_token=access_token,
+        refresh_token=refresh_token,
+        id_token=id_token,
+        expires_in=expires_in,
+        scope=scope,
         raw_body=raw_body,
     )
 
