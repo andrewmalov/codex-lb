@@ -20,9 +20,7 @@ no network, no LLM, no fixtures from the host repo.
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -156,7 +154,8 @@ def test_preflight_missing_claude_exits_4(tmp_path: Path) -> None:
 def test_setup_remote_idempotent(tmp_path: Path) -> None:
     """Re-running the script never mutates the existing correct URL."""
     fake_fork = _clone(_make_bare_with_commit(tmp_path / "u.git", tmp_path / "seed"), tmp_path / "fork")
-    run = lambda: subprocess.run([str(SETUP_SCRIPT)], cwd=fake_fork, capture_output=True, text=True, check=False)
+    def run() -> subprocess.CompletedProcess[str]:
+        return subprocess.run([str(SETUP_SCRIPT)], cwd=fake_fork, capture_output=True, text=True, check=False)
     out1 = run()
     out2 = run()
     assert out1.returncode == 0 and out2.returncode == 0
