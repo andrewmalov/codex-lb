@@ -11,12 +11,12 @@ import json
 from typing import Any
 
 import pytest
-from app.modules.claude.oauth.tokens import ClaudeOauthClaims
 
 from app.modules.claude.auth_manager import (
     ClaudeAccountAlreadyExists,
     ClaudeAuthManager,
 )
+from app.modules.claude.oauth.tokens import ClaudeOauthClaims
 
 pytestmark = pytest.mark.unit
 

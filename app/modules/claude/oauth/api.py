@@ -15,7 +15,7 @@ shape serialization.
 from __future__ import annotations
 
 import logging
-from typing import Any, AsyncIterator
+from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +41,7 @@ from app.modules.claude.oauth.schemas import (
     ClaudeOauthStartResponse,
     ClaudeOauthStatusResponse,
 )
-from app.modules.claude.oauth.service import ClaudeOAuthService, ClaudeOauthFlowError
+from app.modules.claude.oauth.service import ClaudeOauthFlowError, ClaudeOAuthService
 from app.modules.claude.repository import SqlClaudeAccountRepository
 
 logger = logging.getLogger(__name__)
