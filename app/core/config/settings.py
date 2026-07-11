@@ -190,6 +190,11 @@ class Settings(BaseSettings):
     claude_models_path: str = "/v1/models"
     claude_oauth_refresh_skew_seconds: int = 600
     claude_oauth_extra_headers: Annotated[dict[str, str], NoDecode] = Field(default_factory=dict)
+    claude_oauth_client_id: str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    claude_oauth_redirect_uri: str = "https://console.anthropic.com/oauth/code"
+    claude_oauth_scopes: str = "user:profile user:inference"
+    claude_oauth_flow_ttl_seconds: int = 600
+    claude_oauth_authorization_code_max_length: int = 4096
     auth_guardian_enabled: bool = False
     auth_guardian_interval_seconds: int = Field(default=21600, gt=0)
     auth_guardian_max_refresh_age_seconds: int = Field(default=43200, gt=0)

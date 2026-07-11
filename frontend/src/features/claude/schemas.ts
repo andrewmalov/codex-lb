@@ -43,3 +43,37 @@ export const DisableClaudeAccountRequestSchema = z.object({
 });
 
 export type DisableClaudeAccountRequest = z.infer<typeof DisableClaudeAccountRequestSchema>;
+
+export const ClaudeOauthStartResponseSchema = z.object({
+  flowId: z.string(),
+  authorizationUrl: z.string().url(),
+  stateToken: z.string(),
+  expiresInSeconds: z.number().int().positive(),
+  callbackInstructions: z.string(),
+  redirectUri: z.string().url(),
+});
+export type ClaudeOauthStartResponse = z.infer<typeof ClaudeOauthStartResponseSchema>;
+
+export const ClaudeOauthCallbackRequestSchema = z.object({
+  flowId: z.string().min(1),
+  code: z.string().min(1).max(4096),
+  state: z.string().min(1).max(4096),
+});
+export type ClaudeOauthCallbackRequest = z.infer<typeof ClaudeOauthCallbackRequestSchema>;
+
+export const ClaudeOauthCallbackResponseSchema = z.object({
+  status: z.literal("success"),
+  account: ClaudeAccountSchema,
+});
+export type ClaudeOauthCallbackResponse = z.infer<typeof ClaudeOauthCallbackResponseSchema>;
+
+export const ClaudeOauthStatusResponseSchema = z.object({
+  flowId: z.string(),
+  status: z.enum(["pending", "success", "error"]),
+  errorMessage: z.string().nullable().optional(),
+  errorCode: z.string().nullable().optional(),
+  accountId: z.string().nullable().optional(),
+  startedAt: z.string(),
+  finishedAt: z.string().nullable().optional(),
+});
+export type ClaudeOauthStatusResponse = z.infer<typeof ClaudeOauthStatusResponseSchema>;

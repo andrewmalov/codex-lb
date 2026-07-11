@@ -451,6 +451,42 @@
       "added": "Claude 账户已添加",
       "disabled": "Claude 账户已禁用",
       "enabled": "Claude 账户已启用"
+    },
+    "oauth": {
+      "add": {
+        "button": "通过 OAuth 添加 Claude 账户",
+        "manualLink": "或手动粘贴令牌"
+      },
+      "step1": {
+        "title": "第一步 — 打开此链接并完成授权",
+        "copy": "复制链接",
+        "open": "在新标签页中打开"
+      },
+      "step2": {
+        "title": "第二步 — 粘贴授权码",
+        "codeLabel": "授权码",
+        "codePlaceholder": "在此粘贴来自 claude.ai 的授权码",
+        "stateLabel": "State（已自动填充）",
+        "submit": "提交"
+      },
+      "step3": {
+        "title": "账户已添加"
+      },
+      "error": {
+        "title": "无法添加账户",
+        "startOver": "重新开始",
+        "id_token_missing": "Anthropic 未返回 id_token，请使用手动粘贴方式。",
+        "id_token_claims_incomplete": "无法从 id_token 中解析出账户身份，请使用手动粘贴方式。",
+        "id_token_malformed": "id_token 无法解析，请使用手动粘贴方式。",
+        "flow_expired": "该授权请求已过期，请重新开始。",
+        "flow_not_found": "未找到对应的授权请求，请重新开始。",
+        "flow_not_pending": "该授权流程已经结束。",
+        "state_mismatch": "提交的 state 与记录不匹配，请重新开始。",
+        "account_already_exists": "该 Claude 账户已在账户池中。",
+        "invalid_grant": "授权码无效或已被使用，请重新开始。",
+        "anthropic_unreachable": "Anthropic OAuth 暂时无法访问，请稍后再试。",
+        "generic": "发生错误，请重试。"
+      }
     }
   }
 }

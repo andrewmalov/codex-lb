@@ -8,9 +8,10 @@ dependency factory used at startup and by tests.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
 
 from app.core.clients.anthropic.chat import AiohttpClaudeChatTransport, build_claude_chat_client
+from app.core.clients.anthropic.oauth import ClaudeOAuthClient
 from app.core.config.settings import get_settings
 from app.db.session import get_background_session
 from app.modules.accounts.repository import AccountsRepository
@@ -103,6 +104,43 @@ class _LazySession:
         from app.core.clients.http import get_http_client
 
         return await get_http_client().session.post(*args, **kwargs)
+
+
+class _LazyAiohttpOAuthTransport:
+    """Lazy aiohttp adapter for :class:`ClaudeOAuthTransport`.
+
+    The OAuth token endpoint only needs a single ``post`` method that
+    returns an aiohttp ``ClientResponse``-shaped object (``.status``,
+    ``.json()``, ``.read()``). We defer session resolution until the
+    request is actually issued so lifespan wiring stays cheap and unit
+    tests that never call out to the network can still exercise this
+    code path.
+    """
+
+    async def post(self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]) -> Any:
+        from app.core.clients.http import get_http_client
+
+        return await get_http_client().session.post(
+            url,
+            json=dict(json),
+            headers=dict(headers),
+        )
+
+
+def build_claude_oauth_client() -> ClaudeOAuthClient:
+    """Construct a :class:`ClaudeOAuthClient` wired to the shared HTTP client.
+
+    Mirrors :func:`build_claude_proxy_service` for the chat path: the
+    lifespan stores the result on ``app.state.claude_oauth_client`` and
+    the API DI (``app/modules/claude/oauth/api.py``) reuses it. Tests
+    can override the client via FastAPI's ``dependency_overrides`` on
+    :func:`app.modules.claude.oauth.api.get_claude_oauth_service`.
+    """
+    settings = get_settings()
+    return ClaudeOAuthClient(
+        transport=_LazyAiohttpOAuthTransport(),
+        settings=settings,
+    )
 
 
 class _LazyAccountsRepository:
@@ -216,4 +254,4 @@ class _LazyClaudeAccountRepository:
             return await SqlClaudeAccountRepository(session).count_active()
 
 
-__all__ = ["build_claude_proxy_service"]
+__all__ = ["build_claude_proxy_service", "build_claude_oauth_client"]

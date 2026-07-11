@@ -48,6 +48,7 @@ from app.modules.api_keys import api as api_keys_api
 from app.modules.api_keys.reset_scheduler import build_api_key_limit_reset_scheduler
 from app.modules.audit import api as audit_api
 from app.modules.claude import api as claude_api
+from app.modules.claude.oauth import api as claude_oauth_api
 from app.modules.conversation_archive import api as conversation_archive_api
 from app.modules.dashboard import api as dashboard_api
 from app.modules.dashboard_auth import api as dashboard_auth_api
@@ -148,9 +149,10 @@ async def lifespan(app: FastAPI):
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready:
         startup_module.mark_bridge_durable_schema_ready()
-    from app.modules.claude.wiring import build_claude_proxy_service
+    from app.modules.claude.wiring import build_claude_oauth_client, build_claude_proxy_service
 
     app.state.claude_proxy_service = build_claude_proxy_service()
+    app.state.claude_oauth_client = build_claude_oauth_client()
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
@@ -446,6 +448,7 @@ def create_app() -> FastAPI:
     # dependency; admin routes use the dashboard session dependency).
     app.include_router(claude_api.router)
     app.include_router(claude_api.admin_router)
+    app.include_router(claude_oauth_api.router)
 
     static_dir = Path(__file__).parent / "static"
     index_html = static_dir / "index.html"
