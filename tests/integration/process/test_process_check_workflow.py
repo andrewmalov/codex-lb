@@ -29,9 +29,10 @@ def mirrored_contracts(tmp_path: Path) -> Path:
 def _run_with_dir(contracts_dir: Path) -> subprocess.CompletedProcess:
     wrapper = f"""
 import sys
+from pathlib import Path
 sys.path.insert(0, {str(CLI.parent)!r})
 import validate_contracts
-validate_contracts.CONTRACTS_DIR = {str(contracts_dir)!r}
+validate_contracts.CONTRACTS_DIR = Path({str(contracts_dir)!r})
 sys.exit(validate_contracts.main())
 """
     return subprocess.run(
