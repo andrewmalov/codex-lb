@@ -46,7 +46,7 @@ jobs:
           username: ${{ env.DEPLOY_USER }}
           key: ${{ secrets.TEST_SSH_KEY }}
           command_timeout: 8m
-          envs: GHCR_USER,GHCR_PACKAGES_READ_TOKEN
+          envs: SERVER_DIR,IMAGE_REF,GHCR_USER,GHCR_PACKAGES_READ_TOKEN
           script: |
             set -euo pipefail
 
