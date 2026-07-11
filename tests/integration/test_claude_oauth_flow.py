@@ -189,9 +189,7 @@ async def test_oauth_link_flow_creates_account_and_does_not_leak_tokens(async_cl
     # Anthropic's whitelist for the public Claude Code OAuth client. Without
     # these, Anthropic rejects the request with "Redirect URI ... is not
     # supported by client." See openspec/.../fix-claude-oauth-link-endpoints.
-    assert start_payload["authorizationUrl"].startswith(
-        "https://claude.com/cai/oauth/authorize?code=true&"
-    )
+    assert start_payload["authorizationUrl"].startswith("https://claude.com/cai/oauth/authorize?code=true&")
     assert "redirect_uri=" in start_payload["authorizationUrl"]
     assert (
         "platform.claude.com%2Foauth%2Fcode%2Fcallback" in start_payload["authorizationUrl"]

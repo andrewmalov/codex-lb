@@ -404,27 +404,23 @@ async def test_start_oauth_emits_claude_code_cli_url_with_code_true_flag() -> No
     assert parsed.path == "/cai/oauth/authorize"
     qs = parse_qs(parsed.query)
     # ``code=true`` must be the first query parameter (matches Claude Code CLI).
-    assert qs.get("code") == ["true"], (
-        "code=true is required to select Anthropic's OOB code-display flow"
-    )
+    assert qs.get("code") == ["true"], "code=true is required to select Anthropic's OOB code-display flow"
     # The order of the query string matters because Anthropic's authorize
     # endpoint requires ``code=true`` first; assert the literal substring
     # appears right after the question mark.
-    assert resp.authorization_url.startswith(
-        "https://claude.com/cai/oauth/authorize?code=true&"
-    )
+    assert resp.authorization_url.startswith("https://claude.com/cai/oauth/authorize?code=true&")
     # Redirect URI is the one Anthropic has whitelisted for the public
     # Claude Code client_id.
-    assert qs.get("redirect_uri") == [
-        "https://platform.claude.com/oauth/code/callback"
-    ]
+    assert qs.get("redirect_uri") == ["https://platform.claude.com/oauth/code/callback"]
     assert qs.get("client_id") == ["9d1c250a-e61b-44d9-88ed-5944d1962f5e"]
     assert qs.get("response_type") == ["code"]
     assert qs.get("code_challenge_method") == ["S256"]
     assert resp.redirect_uri == "https://platform.claude.com/oauth/code/callback"
 
 
-def test_default_settings_pin_claude_code_compatible_endpoints() -> None:
+def test_default_settings_pin_claude_code_compatible_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Pin the production defaults so they cannot drift back to the rejected values.
 
     If either default regresses, operators will hit Anthropic's
@@ -432,8 +428,10 @@ def test_default_settings_pin_claude_code_compatible_endpoints() -> None:
     """
     from app.core.config.settings import Settings
 
-    # Construct Settings without reading the host's environment so the defaults
-    # are exercised in isolation (env vars still take precedence in production).
-    settings = Settings(_env_file=None)
+    # Clear env vars that could shadow the defaults (matches the project
+    # convention in tests/unit/test_settings_*.py).
+    monkeypatch.delenv("CODEX_LB_CLAUDE_OAUTH_AUTHORIZE_ENDPOINT", raising=False)
+    monkeypatch.delenv("CODEX_LB_CLAUDE_OAUTH_REDIRECT_URI", raising=False)
+    settings = Settings()
     assert settings.claude_oauth_authorize_endpoint == "https://claude.com/cai/oauth/authorize"
     assert settings.claude_oauth_redirect_uri == "https://platform.claude.com/oauth/code/callback"
