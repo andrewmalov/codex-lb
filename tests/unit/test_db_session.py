@@ -614,7 +614,7 @@ async def test_safe_close_outlives_caller_cancellation() -> None:
 
     async def run_cleanup() -> None:
         try:
-            await session_module._safe_close(cast(session_module.AsyncSession, FakeSession()))
+            await session_module.safe_close(cast(session_module.AsyncSession, FakeSession()))
         finally:
             cleanup_done.set()
 
@@ -648,7 +648,7 @@ async def test_safe_rollback_outlives_caller_cancellation() -> None:
 
     async def run_cleanup() -> None:
         try:
-            await session_module._safe_rollback(cast(session_module.AsyncSession, FakeSession()))
+            await session_module.safe_rollback(cast(session_module.AsyncSession, FakeSession()))
         finally:
             cleanup_done.set()
 

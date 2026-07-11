@@ -36,7 +36,7 @@ from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.metrics.prometheus import codex_lb_claude_refresh_total
 from app.db.models import Account, AccountStatus
-from app.db.session import get_background_session
+from app.db.session import get_background_session, safe_rollback
 from app.modules.claude.repository import ClaudeAccountRepository, SqlClaudeAccountRepository
 
 logger = logging.getLogger(__name__)
@@ -81,17 +81,8 @@ async def _claude_refresh_session() -> AsyncIterator[AsyncSession]:
             yield session
             await session.commit()
         except BaseException:
-            await _safe_rollback(session)
+            await safe_rollback(session)
             raise
-
-
-async def _safe_rollback(session: AsyncSession) -> None:
-    if not session.in_transaction():
-        return
-    try:
-        await session.rollback()
-    except BaseException:
-        return
 
 
 # --- Public exceptions -----------------------------------------------------

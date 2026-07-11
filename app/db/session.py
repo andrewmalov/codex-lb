@@ -165,7 +165,7 @@ async def _shielded(awaitable: Awaitable[object]) -> None:
         raise
 
 
-async def _safe_rollback(session: AsyncSession) -> None:
+async def safe_rollback(session: AsyncSession) -> None:
     if not session.in_transaction():
         return
     try:
@@ -174,7 +174,7 @@ async def _safe_rollback(session: AsyncSession) -> None:
         return
 
 
-async def _safe_close(session: AsyncSession) -> None:
+async def safe_close(session: AsyncSession) -> None:
     try:
         await _shielded(session.close())
     except BaseException:
@@ -245,12 +245,12 @@ async def get_background_session() -> AsyncIterator[AsyncSession]:
     try:
         yield session
     except BaseException:
-        await _safe_rollback(session)
+        await safe_rollback(session)
         raise
     finally:
         if session.in_transaction():
-            await _safe_rollback(session)
-        await _safe_close(session)
+            await safe_rollback(session)
+        await safe_close(session)
 
 
 @asynccontextmanager
@@ -271,12 +271,12 @@ async def get_session() -> AsyncIterator[AsyncSession]:
     try:
         yield session
     except BaseException:
-        await _safe_rollback(session)
+        await safe_rollback(session)
         raise
     finally:
         if session.in_transaction():
-            await _safe_rollback(session)
-        await _safe_close(session)
+            await safe_rollback(session)
+        await safe_close(session)
 
 
 async def init_db() -> None:

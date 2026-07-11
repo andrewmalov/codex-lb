@@ -4,7 +4,6 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import cast as typing_cast
 
-import anyio
 from sqlalchemy import Integer, String, and_, cast, func, literal_column, or_, select
 from sqlalchemy import exc as sa_exc
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,7 +14,7 @@ from app.core.usage.types import BucketModelAggregate, RequestActivityAggregate
 from app.core.utils.request_id import ensure_request_id
 from app.core.utils.time import utcnow
 from app.db.models import Account, ApiKey, RequestKind, RequestLog
-from app.db.session import sqlite_writer_section
+from app.db.session import safe_rollback, sqlite_writer_section
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,7 +314,7 @@ class RequestLogsRepository:
             except sa_exc.ResourceClosedError:
                 return log
             except BaseException:
-                await _safe_rollback(self._session)
+                await safe_rollback(self._session)
                 raise
 
     async def update_model_for_request(self, request_id: str, model: str) -> int:
@@ -349,7 +348,7 @@ class RequestLogsRepository:
             except sa_exc.ResourceClosedError:
                 return 0
             except BaseException:
-                await _safe_rollback(self._session)
+                await safe_rollback(self._session)
                 raise
             return len(logs)
 
@@ -595,13 +594,3 @@ class RequestLogsRepository:
             ApiKey,
             ApiKey.id == RequestLog.api_key_id,
         )
-
-
-async def _safe_rollback(session: AsyncSession) -> None:
-    if not session.in_transaction():
-        return
-    try:
-        with anyio.CancelScope(shield=True):
-            await session.rollback()
-    except BaseException:
-        return
