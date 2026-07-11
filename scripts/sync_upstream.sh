@@ -69,6 +69,10 @@ LOG_FILE="${LOG_DIR}/sync_upstream_$(date +%F).log"
 # Tee to log; surface only the trailing JSON result line on stdout so the
 # wrapper and any caller (e.g. launchd) can parse status without scanning
 # every line of agent output.
+#
+# Note: ``--output-format json`` wraps the agent's full reply in one big
+# envelope line, which defeats line-level parsing. We use the default
+# ``text`` output so each agent response line is preserved in the log.
 {
   echo "=== sync_upstream run at $(date -Iseconds) ==="
   echo "cwd: ${REPO_ROOT}"
@@ -81,7 +85,6 @@ LOG_FILE="${LOG_DIR}/sync_upstream_$(date +%F).log"
 set +e
 GITHUB_TOKEN="${GITHUB_TOKEN}" \
   claude -p "${PROMPT_ARGS}" \
-    --output-format json \
     --permission-mode acceptEdits \
     >>"${LOG_FILE}" 2>&1
 claude_rc=$?
@@ -95,7 +98,16 @@ set -e
 # Parse the machine-readable result line emitted by the skill on its last
 # stdout line. The wrapper's own callers (launchd, cron) read this and
 # translate to a small set of exit codes.
-status_line="$(grep -E '^\{"status":' "${LOG_FILE}" | tail -n1 || true)"
+#
+# The agent may wrap the JSON in a markdown code fence (`` ```json ... `` ``` ``),
+# so we strip leading/trailing fences and any backticks before parsing.
+status_line="$(
+  awk '
+    /^```/{ in_block = !in_block; next }
+    in_block { print; next }
+    { print }
+  ' "${LOG_FILE}" | grep -oE '\{[^{}]*"status"[^{}]*\}' | tail -n1
+)" || true
 if [[ -z "${status_line}" ]]; then
   # No structured result -> treat the claude CLI's exit code as authoritative.
   case "${claude_rc}" in
