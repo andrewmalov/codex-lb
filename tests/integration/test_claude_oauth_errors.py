@@ -22,7 +22,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, AsyncGenerator, Mapping, cast
 
 import pytest
 
@@ -48,7 +48,7 @@ class _StubOAuthTransport:
         self._response = response
         self.calls: list[dict[str, Any]] = []
 
-    async def post(self, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _StubResponse:
+    async def post(self, url: str, *, json: Mapping[str, Any], headers: Mapping[str, str]) -> _StubResponse:
         self.calls.append({"url": url, "json": json, "headers": headers})
         if isinstance(self._response, Exception):
             raise self._response
@@ -138,7 +138,7 @@ def make_stubbed_oauth(app_instance):
                     except Exception:
                         pass
                 try:
-                    await session_gen.aclose()
+                    await cast(AsyncGenerator[Any, None], session_gen).aclose()
                 except Exception:
                     pass
 

@@ -14,7 +14,7 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 from urllib.parse import quote
 
 from app.core.clients.anthropic.errors import ClaudeAuthError, ClaudeUpstreamError
@@ -90,7 +90,7 @@ class _Flow:
     code_verifier: str
     redirect_uri: str
     started_at: float
-    status: str = "pending"  # pending | success | error
+    status: Literal["pending", "success", "error"] = "pending"
     error_code: str | None = None
     error_message: str | None = None
     finished_at: float | None = None
@@ -247,7 +247,7 @@ class ClaudeOAuthService:
         self._maybe_expire_locked(flow)
         return ClaudeOauthStatusResponse(
             flow_id=flow.flow_id,
-            status=flow.status,  # type: ignore[arg-type]
+            status=flow.status,
             error_code=flow.error_code,
             error_message=flow.error_message,
             account_id=flow.account_id,
@@ -290,9 +290,21 @@ class ClaudeOAuthService:
                 http_status=400,
             )
 
+        if self._oauth_client is None or self._auth_manager is None:
+            # The service is constructed without collaborators only by tests
+            # that exercise the ``start`` / ``status`` paths in isolation.
+            # ``complete_oauth`` requires both — surface a flow-level error
+            # rather than a NoneType crash so the dashboard sees a clean
+            # envelope.
+            raise ClaudeOauthFlowError(
+                "anthropic_unreachable",
+                "OAuth service is not fully wired; cannot complete the flow.",
+                http_status=503,
+            )
+
         # Token exchange via the OAuth client.
         try:
-            result = await self._oauth_client.exchange_authorization_code(  # type: ignore[union-attr]
+            result = await self._oauth_client.exchange_authorization_code(
                 code=code,
                 code_verifier=flow.code_verifier,
                 redirect_uri=flow.redirect_uri,
@@ -345,7 +357,7 @@ class ClaudeOAuthService:
             ) from exc
 
         try:
-            account_id = await self._auth_manager.add_claude_account_from_oauth(  # type: ignore[union-attr]
+            account_id = await self._auth_manager.add_claude_account_from_oauth(
                 access_token=result.access_token,
                 refresh_token=result.refresh_token,
                 expires_in=result.expires_in,

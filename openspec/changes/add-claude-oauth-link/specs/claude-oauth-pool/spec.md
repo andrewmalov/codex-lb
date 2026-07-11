@@ -15,7 +15,7 @@ The system SHALL expose `POST /api/claude/oauth/start`, `GET /api/claude/oauth/s
 - Parse the `id_token` from the token response. If `id_token` is missing or does not contain `claude_account_uuid`, the system SHALL reject the request with HTTP 400 and `error_code` `id_token_missing` or `id_token_claims_incomplete`, and SHALL direct the operator to use the manual paste endpoint.
 - Persist the new account via the same encryption + insert path used by the existing `POST /api/claude/accounts` (manual paste) endpoint. The fields `claude_account_uuid`, `scopes`, `user_email`, and `user_organization_uuid` SHALL be sourced from the parsed `id_token` claims; `access_token`, `refresh_token`, and `expires_in` SHALL be sourced from the token response body.
 - Reject the callback when the supplied `state` does not match the stored state token (HTTP 400, `error_code: state_mismatch`).
-- Reject the callback when the `code` is empty (HTTP 400, `error_code: missing_code`).
+- Reject the callback when the `code` is empty at request validation time (HTTP 422 Pydantic envelope).
 - Reject a duplicate `claude_account_uuid` with HTTP 409 (`error_code: account_already_exists`).
 - Support at most one in-flight flow at a time. A new `POST /api/claude/oauth/start` SHALL transition any prior `pending` flow to `error` with `error_code: superseded`, and SHALL create a new flow with a fresh state token and PKCE pair.
 - Consider a pending flow expired when `started_at + claude_oauth_flow_ttl_seconds < now()` at the moment of a status or callback request (lazy evaluation; no background sweeper task is required). Past that point the callback SHALL return HTTP 410 (`error_code: flow_expired`) and the status endpoint SHALL report `status: error` with `error_code: flow_expired`.
@@ -87,8 +87,8 @@ The system SHALL expose `POST /api/claude/oauth/start`, `GET /api/claude/oauth/s
 
 #### Scenario: Status lookup for unknown flow
 
-- **WHEN** admin calls `GET /api/claude/oauth/status?flowId={id}` with a `flow_id` that does not exist
-- **THEN** the system returns 404 with `error_code: flow_not_found`
+- **WHEN** admin calls `GET /api/claude/oauth/status?flowId={id}` with a `flow_id` that does not exist (or that was superseded)
+- **THEN** the system returns 200 with `status: "error"`, `error_code: "flow_not_found"`, and `started_at`/`finished_at` populated so the dialog can render the failure inline without treating it as an HTTP error
 
 #### Scenario: Empty code or state
 

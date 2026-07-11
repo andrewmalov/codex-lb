@@ -38,6 +38,18 @@ class _StubProxyService:
     to resolve ``_get_service`` if anything in the route tree probes it.
     """
 
+    async def select_account(self, **_kwargs: Any) -> Any:
+        return None
+
+    async def record_error(self, account: Any) -> None:
+        return None
+
+    async def get_access_token(self, account: Any) -> str:
+        return "AT"
+
+    async def rotate_claude_access_token(self, account: Any) -> Any:
+        return None
+
     async def stream_or_complete_messages(
         self,
         *,
@@ -64,10 +76,6 @@ class _StubProxyService:
 @pytest.fixture()
 def stubbed_claude_service(app_instance):
     stub = _StubProxyService()
-    stub.select_account = lambda *_a, **_kw: None  # type: ignore[attr-defined]
-    stub.record_error = lambda *_a, **_kw: None  # type: ignore[attr-defined]
-    stub.get_access_token = lambda _account: "AT"  # type: ignore[attr-defined]
-    stub.rotate_claude_access_token = lambda *_a, **_kw: None  # type: ignore[attr-defined]
     app_instance.state.claude_proxy_service = stub  # type: ignore[attr-defined]
     return stub
 

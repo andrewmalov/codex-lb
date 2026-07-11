@@ -182,7 +182,6 @@ The full `error_code` enumeration:
 | `flow_expired`              | 410  | TTL elapsed |
 | `flow_not_pending`          | 409  | flow is already success/error |
 | `state_mismatch`            | 400  | pasted `state` does not match stored token |
-| `missing_code`              | 400  | `code` empty |
 | `invalid_grant`             | 502  | Anthropic returned 400 `invalid_grant` |
 | `anthropic_unreachable`     | 502  | Anthropic 5xx or network failure |
 | `id_token_missing`          | 400  | token response omitted `id_token` |

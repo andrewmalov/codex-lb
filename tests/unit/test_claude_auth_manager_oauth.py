@@ -22,10 +22,14 @@ pytestmark = pytest.mark.unit
 
 
 class _CapturingRepo:
-    """In-memory repo stand-in that records the inserted row."""
+    """In-memory repo stand-in that records the inserted row.
+
+    Implements the full :class:`app.modules.claude.repository.ClaudeAccountRepository`
+    protocol as no-ops for methods the OAuth wrapper does not exercise.
+    """
 
     def __init__(self) -> None:
-        self.inserted: dict[str, Any] | None = None
+        self.inserted: dict[str, Any] = {}
 
     async def exists_by_claude_uuid(self, claude_uuid: str) -> bool:
         return False
@@ -34,12 +38,61 @@ class _CapturingRepo:
         self.inserted = row
         return type("Row", (), {"id": row["id"]})()
 
+    async def get_by_id(self, account_id: str) -> Any:
+        return None
+
+    async def update_tokens(self, **_kwargs: Any) -> bool:
+        return True
+
+    async def deactivate(self, account_id: str, *, reason: str) -> bool:
+        return True
+
+    async def activate(self, account_id: str) -> bool:
+        return True
+
+    async def list_accounts(self) -> list[Any]:
+        return []
+
+    async def find_due_for_rotation(self, **_kwargs: Any) -> list[Any]:
+        return []
+
+    async def count_active(self) -> int:
+        return 0
+
 
 class _ExistingRepo:
-    """Repo stand-in that reports the UUID as already-taken."""
+    """Repo stand-in that reports the UUID as already-taken.
+
+    Implements the full :class:`app.modules.claude.repository.ClaudeAccountRepository`
+    protocol as no-ops for methods the OAuth wrapper does not exercise.
+    """
 
     async def exists_by_claude_uuid(self, claude_uuid: str) -> bool:
         return True
+
+    async def insert(self, row: dict[str, Any]) -> Any:
+        return type("Row", (), {"id": row["id"]})()
+
+    async def get_by_id(self, account_id: str) -> Any:
+        return None
+
+    async def update_tokens(self, **_kwargs: Any) -> bool:
+        return True
+
+    async def deactivate(self, account_id: str, *, reason: str) -> bool:
+        return True
+
+    async def activate(self, account_id: str) -> bool:
+        return True
+
+    async def list_accounts(self) -> list[Any]:
+        return []
+
+    async def find_due_for_rotation(self, **_kwargs: Any) -> list[Any]:
+        return []
+
+    async def count_active(self) -> int:
+        return 0
 
 
 @pytest.mark.asyncio
@@ -61,14 +114,12 @@ async def test_add_claude_account_from_oauth_delegates_with_claim_derived_fields
     )
 
     assert new_id == "claude-acct-uuid"
-    assert repo.inserted is not None
+    assert repo.inserted != {}
 
     row = repo.inserted
     assert row["claude_account_uuid"] == "acct-uuid"
-    # Column names match the existing ``add_claude_account`` row keys
     assert row["claude_user_email"] == "u@example.test"
     assert row["claude_user_organization_uuid"] == "org-uuid"
-    # scopes stored as JSON-encoded string
     assert json.loads(row["claude_scopes"]) == ["user:profile", "user:inference"]
 
 

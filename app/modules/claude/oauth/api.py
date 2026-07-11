@@ -108,7 +108,6 @@ _ERROR_CODE_TO_EXC: dict[str, type] = {
     "flow_expired": DashboardGoneError,
     "flow_not_pending": DashboardConflictError,
     "state_mismatch": DashboardBadRequestError,
-    "missing_code": DashboardBadRequestError,
     "invalid_grant": DashboardUpstreamError,
     "anthropic_unreachable": DashboardUpstreamError,
     "id_token_missing": DashboardBadRequestError,
