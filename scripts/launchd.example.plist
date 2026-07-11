@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Example launchd plist for the codex-lb upstream-sync wrapper.
+
+  How to install:
+    1. cp scripts/launchd.example.plist ~/Library/LaunchAgents/com.codex-lb.sync-upstream.plist
+    2. Edit the copy and:
+       a. Replace /Users/OPERATOR/codex-lb with the absolute path to your clone.
+       b. Uncomment the GITHUB_TOKEN env var and paste your PAT (repo + workflow scopes).
+       c. Adjust StartCalendarInterval to the cadence you want (default: 03:17 local daily).
+    3. launchctl load -w ~/Library/LaunchAgents/com.codex-lb.sync-upstream.plist
+    4. Verify:  launchctl list | grep codex-lb.sync-upstream
+
+  How to uninstall:
+    launchctl unload ~/Library/LaunchAgents/com.codex-lb.sync-upstream.plist
+    rm        ~/Library/LaunchAgents/com.codex-lb.sync-upstream.plist
+
+  Logs:
+    The wrapper itself routes agent output to logs/sync_upstream_YYYY-MM-DD.log
+    inside the repo. The two StandardOutPath / StandardErrorPath entries below
+    only capture launchd's view of the wrapper's own stderr (e.g. the "error:
+    GITHUB_TOKEN is not set" preflight line) and are useful for crash triage.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.codex-lb.sync-upstream</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/OPERATOR/codex-lb/scripts/sync_upstream.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/OPERATOR/codex-lb</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Replace with your actual PAT before loading. PAT needs `repo` and
+         `workflow` scopes so the sync agent can open PRs and issues. -->
+    <!-- <key>GITHUB_TOKEN</key><string>ghp_replace_me_with_real_pat</string> -->
+    <!-- Optional: also set GH_HOST if using GitHub Enterprise. -->
+  </dict>
+
+  <!-- Daily at 03:17 local time. Change Hour/Minute to taste; for weekly
+       add Weekday, for monthly add Day. See `man 5 launchd.plist`. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Hour</key>      <integer>3</integer>
+    <key>Minute</key>    <integer>17</integer>
+  </dict>
+
+  <!-- launchd-level log capture (wrapper-level logs go to logs/ in the repo). -->
+  <key>StandardOutPath</key>
+  <string>/tmp/com.codex-lb.sync-upstream.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/com.codex-lb.sync-upstream.err.log</string>
+
+  <!-- Don't run if the previous invocation is still going. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+
+  <!-- Keep the load active across reboots. -->
+  <key>RunAtLoad</key>
+  <false/>
+</dict>
+</plist>
