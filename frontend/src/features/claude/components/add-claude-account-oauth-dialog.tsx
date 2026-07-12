@@ -173,6 +173,7 @@ function DialogBody({ onSuccess, onClose }: DialogBodyProps) {
               <CopyButton
                 value={startData?.authorizationUrl ?? ""}
                 label={t("claude.oauth.step1.copy")}
+                className="h-9 shrink-0"
                 data-testid="add-claude-account-oauth-copy"
               />
             </div>

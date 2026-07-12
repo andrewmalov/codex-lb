@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -420,18 +421,39 @@ async def test_start_oauth_emits_claude_code_cli_url_with_code_true_flag() -> No
 
 def test_default_settings_pin_claude_code_compatible_endpoints(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     """Pin the production defaults so they cannot drift back to the rejected values.
 
     If either default regresses, operators will hit Anthropic's
     "Redirect URI ... is not supported by client" error at runtime.
     """
+    from pydantic_settings import SettingsConfigDict
+
     from app.core.config.settings import Settings
 
-    # Clear env vars that could shadow the defaults (matches the project
-    # convention in tests/unit/test_settings_*.py).
+    # Clear process env vars AND .env file load path so a developer-local
+    # `.env` containing a stale override cannot shadow the pinned defaults.
+    # Using the same `_env_file` override pattern as
+    # `tests/unit/test_settings_home_dir.py::_settings_from_env_file`, but
+    # pointing at an empty tmp_path file so neither `.env` nor `.env.local`
+    # in BASE_DIR is consulted (Settings model_config has env_file=ENV_FILES).
     monkeypatch.delenv("CODEX_LB_CLAUDE_OAUTH_AUTHORIZE_ENDPOINT", raising=False)
     monkeypatch.delenv("CODEX_LB_CLAUDE_OAUTH_REDIRECT_URI", raising=False)
-    settings = Settings()
+
+    empty_env = tmp_path / "empty.env"
+    empty_env.touch()
+
+    # Subclassing overrides `env_file` in the model_config to None so the
+    # parent class's `env_file=ENV_FILES` setting is bypassed entirely.
+    class _IsolatedSettings(Settings):
+        model_config = SettingsConfigDict(
+            env_prefix="CODEX_LB_",
+            env_file=None,
+            env_file_encoding="utf-8",
+            extra="ignore",
+        )
+
+    settings = _IsolatedSettings(_env_file=empty_env)  # ty: ignore[unknown-argument]
     assert settings.claude_oauth_authorize_endpoint == "https://claude.com/cai/oauth/authorize"
     assert settings.claude_oauth_redirect_uri == "https://platform.claude.com/oauth/code/callback"
