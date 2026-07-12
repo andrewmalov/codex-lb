@@ -13,7 +13,14 @@ on:
       - "uv.lock"
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Use a literal prefix instead of `${{ github.workflow }}` to avoid a
+  # deadlock with the calling workflow (ci.yml), which sets the same
+  # `${{ github.workflow }}-${{ github.ref }}` group. When ci.yml invokes
+  # this workflow via `uses:`, GitHub evaluates `github.workflow` as the
+  # caller's name (`CI`), producing the same concurrency key and triggering
+  # the deadlock detector. The literal `process-contracts-check` prefix
+  # is independent of the caller's name.
+  group: process-contracts-check-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
