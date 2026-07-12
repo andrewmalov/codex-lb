@@ -9,8 +9,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 REPO_ROOT = Path(__file__).resolve().parents[3]
 CLI = REPO_ROOT / "openspec" / "process" / "scripts" / "validate_contracts.py"
 CONTRACTS_DIR = REPO_ROOT / "openspec" / "process" / "contracts"
