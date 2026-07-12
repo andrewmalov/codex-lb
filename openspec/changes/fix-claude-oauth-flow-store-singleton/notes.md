@@ -1,0 +1,21 @@
+## 2026-07-12 — bugfix fix-claude-oauth-flow-store-singleton
+
+- Started: 2026-07-12T18:30:00Z
+- Approvals given: `1` (user authorized the OpenSpec-driven fix after diagnostic showed PR #16 already shipped a different OAuth bug and the real defect was the per-request `_FlowStore` instance).
+- Stop signals fired: none.
+- Artifacts:
+  - `app/modules/claude/wiring.py` — new `build_claude_oauth_flow_store()` factory.
+  - `app/main.py` — lifespan installs `app.state.claude_oauth_flow_store` next to `claude_oauth_client`.
+  - `app/modules/claude/oauth/api.py` — `get_claude_oauth_service` reads `app.state.claude_oauth_flow_store`; raises `RuntimeError` if missing.
+  - `tests/integration/test_claude_oauth_flow_store_persists.py` — new regression test that exercises Start → Submit through the real DI graph (no override).
+  - `tests/integration/test_claude_oauth_flow.py::stubbed_oauth_transport` — fixture simplified to swap `app.state.claude_oauth_client` instead of overriding the whole dependency; manual `_FlowStore()` workaround removed.
+  - `tests/integration/test_claude_oauth_errors.py::make_stubbed_oauth` — same simplification.
+  - `openspec/changes/fix-claude-oauth-flow-store-singleton/{proposal.md, context.md, tasks.md, specs/claude-oauth-pool/spec.md}` — OpenSpec change folder with delta adding "Flow state persists across HTTP requests" requirement.
+- Notes:
+  - Pre-existing integration tests worked around the bug with a `dependency_overrides` that manually shared a `_FlowStore`. After the fix the workaround is no longer needed and the tests now exercise the production DI seam, which is what we actually want to verify.
+  - The `flow_store or _FlowStore()` fallback in `ClaudeOAuthService.__init__` is preserved so unit tests that build the service in isolation continue to work without a lifespan.
+  - Local validation: `pytest tests/integration/test_claude_oauth_flow.py tests/integration/test_claude_oauth_errors.py tests/integration/test_claude_oauth_flow_store_persists.py tests/unit/test_claude_oauth_service.py` → 31 passed.
+  - Local validation: `ruff check` clean, `ty check app/modules/claude app/main.py` clean.
+  - Wider integration run (`pytest tests/integration -q`): 1042 passed, 6 skipped, 3 pre-existing failures unrelated to this change (2 process-check-workflow tests for the missing process contracts from option (a) of the process skill; 1 proxy-responses flaky test).
+  - OpenSpec CLI (`openspec validate`) is unavailable on main because the contracts are missing (option (a) of the process skill). Delta spec was reviewed manually against the existing `claude-oauth-pool` capability for SHALL/MUST consistency.
+  - Multi-replica caveat unchanged: cross-replica flow state still requires sticky-session routing or a shared store. Documented in `context.md`.

@@ -143,6 +143,30 @@ def build_claude_oauth_client() -> ClaudeOAuthClient:
     )
 
 
+def build_claude_oauth_flow_store() -> Any:
+    """Construct the process-singleton OAuth flow store.
+
+    The store MUST be treated as a process singleton: the FastAPI lifespan
+    instantiates it once and exposes it via ``app.state.claude_oauth_flow_store``
+    so the OAuth endpoints (Start / Status / Callback) — which resolve the
+    service via :func:`app.modules.claude.oauth.api.get_claude_oauth_service`
+    on every HTTP request — all see the same in-memory state.
+
+    Without this lifetime the per-request construction of ``ClaudeOAuthService``
+    in the API dependency creates a fresh empty store on every request, and
+    the callback cannot resolve the flow created by ``/start``. See
+    ``openspec/changes/fix-claude-oauth-flow-store-singleton`` for the full
+    bug analysis and spec delta.
+
+    The return type is intentionally ``Any`` because the ``_FlowStore`` class
+    is private to ``app.modules.claude.oauth.service``. The DI seam narrows
+    the type at the boundary.
+    """
+    from app.modules.claude.oauth.service import _FlowStore
+
+    return _FlowStore()
+
+
 class _LazyAccountsRepository:
     """Stub accounts repository used only to satisfy type signatures.
 
@@ -254,4 +278,8 @@ class _LazyClaudeAccountRepository:
             return await SqlClaudeAccountRepository(session).count_active()
 
 
-__all__ = ["build_claude_proxy_service", "build_claude_oauth_client"]
+__all__ = [
+    "build_claude_proxy_service",
+    "build_claude_oauth_client",
+    "build_claude_oauth_flow_store",
+]

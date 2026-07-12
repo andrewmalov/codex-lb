@@ -69,9 +69,16 @@ async def get_claude_oauth_service(
     request-scoped ``SqlClaudeAccountRepository`` so callback persistence
     commits within the request transaction.
 
+    Also reuses the process-singleton OAuth flow store (built by
+    :func:`app.modules.claude.wiring.build_claude_oauth_flow_store`) so the
+    Start, Status, and Callback endpoints — which all resolve this
+    dependency on their own HTTP request — see the same in-memory flow
+    state. Without this, each request would build a fresh empty store and
+    the callback would 404 with ``flow_not_found`` for every flow.
+
     Raises :class:`RuntimeError` when the lifespan has not configured the
-    client — that is a wiring bug, not a runtime fallback. Tests override
-    this dependency directly via ``app.dependency_overrides``.
+    client or flow store — that is a wiring bug, not a runtime fallback.
+    Tests override this dependency directly via ``app.dependency_overrides``.
     """
     settings = get_settings()
     repo = SqlClaudeAccountRepository(session)
@@ -86,12 +93,24 @@ async def get_claude_oauth_service(
             "(see app/modules/claude/wiring.py::build_claude_oauth_client)."
         )
 
+    flow_store = getattr(request.app.state, "claude_oauth_flow_store", None)
+    if flow_store is None:
+        # Lifespan did not provide a flow store. The OAuth service would
+        # silently fall back to a fresh per-request store, which makes
+        # every callback 404. Fail loudly instead — this is a wiring bug.
+        raise RuntimeError(
+            "claude_oauth_flow_store is not configured on app.state. "
+            "Ensure app_lifespan creates a ClaudeOAuthFlowStore "
+            "(see app/modules/claude/wiring.py::build_claude_oauth_flow_store)."
+        )
+
     manager = ClaudeAuthManager(repo=repo)
     yield ClaudeOAuthService(
         settings=settings,
         oauth_client=oauth_client,
         auth_manager=manager,
         accounts_repo=repo,
+        flow_store=flow_store,
     )
 
 

@@ -25,7 +25,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Mapping, cast
+from typing import Any, Mapping
 
 import pytest
 
@@ -85,26 +85,22 @@ def _encode_id_token(payload: dict[str, Any]) -> str:
 def stubbed_oauth_transport(app_instance):
     """Replace the OAuth transport with a stub.
 
-    The default ``get_claude_oauth_service`` builds a :class:`ClaudeOAuthService`
-    with the lifespan-provided ``ClaudeOAuthClient``. We override the
-    dependency to keep the same ``SqlClaudeAccountRepository`` /
-    ``ClaudeAuthManager`` pairing (driven by the request-scoped
-    ``AsyncSession``) but inject our stubbed transport into the client so
-    the Anthropic exchange call is fully observable.
+    The lifespan installs ``app.state.claude_oauth_client`` (a
+    :class:`ClaudeOAuthClient` wrapping the shared HTTP transport). This
+    fixture swaps that client for one wrapping ``_StubOAuthTransport`` so
+    the Anthropic exchange call is fully observable without hitting
+    Anthropic.
 
-    The ``ClaudeOAuthService`` flow store is process-local state, so we
-    share one ``_FlowStore`` instance across every request in the test.
+    No ``dependency_overrides`` is needed: the production
+    ``get_claude_oauth_service`` reads both ``claude_oauth_client`` and the
+    process-singleton ``claude_oauth_flow_store`` from ``app.state`` —
+    both of which this fixture preserves (the client swap is in-place, the
+    flow store is untouched). Sharing the flow store across requests is the
+    property under test for
+    ``tests/integration/test_claude_oauth_flow_store_persists.py``.
     """
     from app.core.clients.anthropic.oauth import ClaudeOAuthClient
     from app.core.config.settings import get_settings
-    from app.db.session import get_session
-    from app.modules.claude.auth_manager import ClaudeAuthManager
-    from app.modules.claude.oauth import api as oauth_api_module
-    from app.modules.claude.oauth.service import (
-        ClaudeOAuthService,
-        _FlowStore,
-    )
-    from app.modules.claude.repository import SqlClaudeAccountRepository
 
     transport = _StubOAuthTransport(
         _StubResponse(
@@ -125,51 +121,15 @@ def stubbed_oauth_transport(app_instance):
         )
     )
     settings = get_settings()
-    flow_store = _FlowStore()
-
-    async def _override_service(request: Any = None):
-        # Open a short-lived session that mirrors what
-        # ``get_claude_oauth_service`` does in production. The
-        # ``_claude_admin_context`` admin route explicitly commits on the
-        # success path — we do the same here so the new account row is
-        # visible to subsequent admin GETs in the same test.
-        session_gen = get_session()
-        session = await session_gen.__anext__()
-        committed = False
-        try:
-            repo = SqlClaudeAccountRepository(session)
-            manager = ClaudeAuthManager(repo=repo)
-            oauth_client = ClaudeOAuthClient(transport=transport, settings=settings)
-            try:
-                yield ClaudeOAuthService(
-                    settings=settings,
-                    oauth_client=oauth_client,
-                    auth_manager=manager,
-                    accounts_repo=repo,
-                    flow_store=flow_store,
-                )
-                await session.commit()
-                committed = True
-            except BaseException:
-                if session.in_transaction():
-                    await session.rollback()
-                raise
-        finally:
-            if not committed and session.in_transaction():
-                try:
-                    await session.rollback()
-                except Exception:
-                    pass
-            try:
-                await cast(AsyncGenerator[Any, None], session_gen).aclose()
-            except Exception:
-                pass
-
-    app_instance.dependency_overrides[oauth_api_module.get_claude_oauth_service] = _override_service
+    saved_client = app_instance.state.claude_oauth_client
+    app_instance.state.claude_oauth_client = ClaudeOAuthClient(
+        transport=transport,
+        settings=settings,
+    )
     try:
         yield transport
     finally:
-        app_instance.dependency_overrides.pop(oauth_api_module.get_claude_oauth_service, None)
+        app_instance.state.claude_oauth_client = saved_client
 
 
 # ---------------------------------------------------------------------------
