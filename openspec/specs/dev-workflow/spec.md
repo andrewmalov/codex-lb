@@ -1,7 +1,14 @@
 # dev-workflow Specification
 
 ## Purpose
-TBD - created by archiving change add-agent-driven-dev-workflow. Update Purpose after archive.
+
+Define and implement a machine-readable contract that encodes the
+recurring codex-lb development tasks (`feature`, `bugfix`,
+`release-beta`, `release-stable`, `sync-upstream`) as ordered phases
+with explicit approval gates, expose it as a `/process` Claude Code
+skill that walks the user through those phases, and gate PRs with a
+GitHub Action that enforces the same rules from the CI side.
+
 ## Requirements
 ### Requirement: Process contracts
 
