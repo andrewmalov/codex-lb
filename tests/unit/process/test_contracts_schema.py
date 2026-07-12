@@ -4,6 +4,7 @@ These tests load every contract YAML and validate it against the JSON
 Schema. They do not assert semantic correctness — that is the role of
 the contract-specific tests in later tasks. They only assert shape.
 """
+
 from __future__ import annotations
 
 import json

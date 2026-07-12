@@ -2,6 +2,7 @@
 
 Run the actual CLI as a subprocess and assert on exit code and stderr.
 """
+
 from __future__ import annotations
 
 import shutil
