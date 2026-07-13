@@ -143,9 +143,7 @@ def stubbed_oauth_client(app_instance):
 
 
 @pytest.mark.asyncio
-async def test_start_then_callback_resolves_flow_via_real_di(
-    async_client, stubbed_oauth_client
-) -> None:
+async def test_start_then_callback_resolves_flow_via_real_di(async_client, stubbed_oauth_client) -> None:
     """Start creates a flow in the singleton store; callback resolves it.
 
     Before the singleton fix the callback would return 404
@@ -171,9 +169,7 @@ async def test_start_then_callback_resolves_flow_via_real_di(
     # 2. Sanity check: the status endpoint in a separate request must
     # also resolve the flow via the same singleton store. Without the
     # fix, the lookup would 404 flow_not_found here too.
-    status_response = await async_client.get(
-        "/api/claude/oauth/status", params={"flowId": flow_id}
-    )
+    status_response = await async_client.get("/api/claude/oauth/status", params={"flowId": flow_id})
     assert status_response.status_code == 200, status_response.text
     status_body = status_response.json()
     assert status_body["status"] == "pending", status_body
@@ -199,9 +195,7 @@ async def test_start_then_callback_resolves_flow_via_real_di(
 
 
 @pytest.mark.asyncio
-async def test_status_lookup_resolves_flow_via_real_di(
-    async_client, stubbed_oauth_client
-) -> None:
+async def test_status_lookup_resolves_flow_via_real_di(async_client, stubbed_oauth_client) -> None:
     """Companion regression test for :func:`test_start_then_callback_resolves_flow_via_real_di`.
 
     The Status endpoint, like Callback, resolves a different request than
@@ -213,9 +207,7 @@ async def test_status_lookup_resolves_flow_via_real_di(
     assert start_response.status_code == 200, start_response.text
     flow_id = start_response.json()["flowId"]
 
-    status_response = await async_client.get(
-        "/api/claude/oauth/status", params={"flowId": flow_id}
-    )
+    status_response = await async_client.get("/api/claude/oauth/status", params={"flowId": flow_id})
     assert status_response.status_code == 200, status_response.text
     status_body = status_response.json()
     assert status_body["status"] == "pending", status_body
