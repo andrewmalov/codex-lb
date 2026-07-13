@@ -22,7 +22,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator, Mapping, cast
+from typing import Any, Mapping
 
 import pytest
 
@@ -68,86 +68,52 @@ def _encode_id_token(payload: dict[str, Any]) -> str:
 
 @pytest.fixture
 def make_stubbed_oauth(app_instance):
-    """Factory fixture that registers a stub transport on the app's OAuth
-    DI seam.
+    """Factory fixture that swaps the lifespan-built OAuth client for one
+    wrapping a stub transport.
 
     Each call to ``install(transport)``:
 
     - Builds a real :class:`ClaudeOAuthClient` wrapping the supplied
-      transport.
-    - Wires a real :class:`SqlClaudeAccountRepository` and
-      :class:`ClaudeAuthManager` against the request-scoped
-      ``AsyncSession``.
-    - Shares one ``_FlowStore`` across requests so multi-step flows can
-      be observed end-to-end.
-    - Commits the session on the success path so persisted rows are
-      visible to subsequent requests (mirrors what the existing
-      ``_claude_admin_context`` does in the admin POST path).
+      transport and replaces ``app_instance.state.claude_oauth_client``
+      in place. The production ``get_claude_oauth_service`` reads this
+      client from ``app.state`` on every request, so the swap takes
+      effect immediately.
+    - Preserves the lifespan-built singleton
+      ``app_instance.state.claude_oauth_flow_store`` so the production DI
+      dependency shares one in-memory store across requests — same as
+      production. The previous manual ``_FlowStore()`` workaround is
+      removed in favour of this shared singleton (see
+      ``openspec/changes/fix-claude-oauth-flow-store-singleton``).
+    - Optional ``settings_override`` mutates settings for the duration of
+      the test (e.g. zero out the flow TTL).
 
-    The fixture accepts an optional ``settings_override`` callable for
-    tests that need to mutate settings (e.g. zero-out the flow TTL).
+    The fixture does NOT register a ``dependency_overrides`` for
+    ``get_claude_oauth_service``: the production dependency is the
+    property under test, so the suite exercises the real DI graph.
     """
     from app.core.clients.anthropic.oauth import ClaudeOAuthClient
     from app.core.config.settings import get_settings
-    from app.db.session import get_session
-    from app.modules.claude.auth_manager import ClaudeAuthManager
-    from app.modules.claude.oauth import api as oauth_api_module
-    from app.modules.claude.oauth.service import (
-        ClaudeOAuthService,
-        _FlowStore,
-    )
-    from app.modules.claude.repository import SqlClaudeAccountRepository
 
     base_settings = get_settings()
-    flow_store = _FlowStore()
+    saved_client = app_instance.state.claude_oauth_client
 
     def _install(
         transport: _StubOAuthTransport,
         *,
         settings_override=None,
     ) -> _StubOAuthTransport:
-        async def _override_service(request: Any = None):
-            if settings_override is not None:
-                settings_override()
-            current_settings = get_settings()
-            session_gen = get_session()
-            session = await session_gen.__anext__()
-            committed = False
-            try:
-                repo = SqlClaudeAccountRepository(session)
-                manager = ClaudeAuthManager(repo=repo)
-                oauth_client = ClaudeOAuthClient(transport=transport, settings=current_settings)
-                try:
-                    yield ClaudeOAuthService(
-                        settings=current_settings,
-                        oauth_client=oauth_client,
-                        auth_manager=manager,
-                        accounts_repo=repo,
-                        flow_store=flow_store,
-                    )
-                    await session.commit()
-                    committed = True
-                except BaseException:
-                    if session.in_transaction():
-                        await session.rollback()
-                    raise
-            finally:
-                if not committed and session.in_transaction():
-                    try:
-                        await session.rollback()
-                    except Exception:
-                        pass
-                try:
-                    await cast(AsyncGenerator[Any, None], session_gen).aclose()
-                except Exception:
-                    pass
-
-        app_instance.dependency_overrides[oauth_api_module.get_claude_oauth_service] = _override_service
+        if settings_override is not None:
+            settings_override()
+        current_settings = get_settings()
+        app_instance.state.claude_oauth_client = ClaudeOAuthClient(
+            transport=transport,
+            settings=current_settings,
+        )
         return transport
 
     yield _install
 
-    app_instance.dependency_overrides.pop(oauth_api_module.get_claude_oauth_service, None)
+    app_instance.state.claude_oauth_client = saved_client
     _ = base_settings  # silence linter
 
 

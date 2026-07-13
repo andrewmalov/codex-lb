@@ -149,10 +149,15 @@ async def lifespan(app: FastAPI):
     bridge_durable_schema_ready = await _ensure_bridge_durable_schema_ready(settings)
     if bridge_durable_schema_ready:
         startup_module.mark_bridge_durable_schema_ready()
-    from app.modules.claude.wiring import build_claude_oauth_client, build_claude_proxy_service
+    from app.modules.claude.wiring import (
+        build_claude_oauth_client,
+        build_claude_oauth_flow_store,
+        build_claude_proxy_service,
+    )
 
     app.state.claude_proxy_service = build_claude_proxy_service()
     app.state.claude_oauth_client = build_claude_oauth_client()
+    app.state.claude_oauth_flow_store = build_claude_oauth_flow_store()
     usage_scheduler = build_usage_refresh_scheduler()
     api_key_limit_reset_scheduler = build_api_key_limit_reset_scheduler()
     model_scheduler = build_model_refresh_scheduler()
