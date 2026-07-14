@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 
 
 class _OAuthClientPort(Protocol):
-    async def exchange_authorization_code(self, *, code: str, code_verifier: str, redirect_uri: str) -> Any: ...
+    async def exchange_authorization_code(self, *, code: str, code_verifier: str, state: str, redirect_uri: str) -> Any: ...
 
 
 class _AuthManagerPort(Protocol):
@@ -313,6 +313,7 @@ class ClaudeOAuthService:
             result = await self._oauth_client.exchange_authorization_code(
                 code=code,
                 code_verifier=flow.code_verifier,
+                state=flow.state_token,
                 redirect_uri=flow.redirect_uri,
             )
         except ClaudeAuthError as exc:

@@ -75,7 +75,7 @@ async def test_exchange_authorization_code_returns_full_result(settings: SimpleN
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     out = await client.exchange_authorization_code(
-        code="AUTH_CODE", code_verifier="VERIFIER", redirect_uri="https://redirect.example/cb"
+        code="AUTH_CODE", code_verifier="VERIFIER", state="STATE", redirect_uri="https://redirect.example/cb"
     )
 
     assert isinstance(out, ClaudeAuthorizationCodeResult)
@@ -90,6 +90,7 @@ async def test_exchange_authorization_code_returns_full_result(settings: SimpleN
         "grant_type": "authorization_code",
         "code": "AUTH_CODE",
         "code_verifier": "VERIFIER",
+        "state": "STATE",
         "client_id": client._client_id,
         "redirect_uri": "https://redirect.example/cb",
     }
@@ -106,7 +107,7 @@ async def test_exchange_authorization_code_tolerates_missing_id_token(settings: 
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     out = await client.exchange_authorization_code(
-        code="AUTH_CODE", code_verifier="VERIFIER", redirect_uri="https://redirect.example/cb"
+        code="AUTH_CODE", code_verifier="VERIFIER", state="STATE", redirect_uri="https://redirect.example/cb"
     )
 
     assert out.id_token is None
@@ -119,7 +120,7 @@ async def test_exchange_authorization_code_invalid_grant_raises_auth_error(setti
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     with pytest.raises(ClaudeAuthError):
-        await client.exchange_authorization_code(code="BAD", code_verifier="V", redirect_uri="https://r.example/cb")
+        await client.exchange_authorization_code(code="BAD", code_verifier="V", state="S", redirect_uri="https://r.example/cb")
 
 
 async def test_exchange_authorization_code_5xx_raises_upstream_error(settings: SimpleNamespace) -> None:
@@ -128,7 +129,7 @@ async def test_exchange_authorization_code_5xx_raises_upstream_error(settings: S
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     with pytest.raises(ClaudeUpstreamError):
-        await client.exchange_authorization_code(code="C", code_verifier="V", redirect_uri="https://r.example/cb")
+        await client.exchange_authorization_code(code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb")
 
 
 async def test_exchange_authorization_code_malformed_body_raises_api_error(settings: SimpleNamespace) -> None:
@@ -137,4 +138,4 @@ async def test_exchange_authorization_code_malformed_body_raises_api_error(setti
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     with pytest.raises(ClaudeAPIError):
-        await client.exchange_authorization_code(code="C", code_verifier="V", redirect_uri="https://r.example/cb")
+        await client.exchange_authorization_code(code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb")

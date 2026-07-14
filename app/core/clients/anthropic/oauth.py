@@ -149,6 +149,7 @@ class ClaudeOAuthClient:
         *,
         code: str,
         code_verifier: str,
+        state: str,
         redirect_uri: str,
     ) -> ClaudeAuthorizationCodeResult:
         """Exchange an OAuth authorization code + PKCE verifier for tokens.
@@ -157,8 +158,12 @@ class ClaudeOAuthClient:
         status and error semantics, with two differences specific to the
         authorization-code flow:
 
-        - The request body carries ``code`` + ``code_verifier`` +
+        - The request body carries ``code`` + ``code_verifier`` + ``state`` +
           ``redirect_uri`` + ``grant_type=authorization_code`` + ``client_id``.
+          Anthropic's token endpoint requires a non-empty ``state`` for the
+          ``authorization_code`` grant and returns a generic 400
+          "Invalid request format" when it is missing or empty (verified
+          2026-07-13 against ``https://platform.claude.com/v1/oauth/token``).
         - A missing ``id_token`` is tolerated (``None``); the caller is
           responsible for the ``id_token_missing`` flow-level error.
         """
@@ -169,6 +174,7 @@ class ClaudeOAuthClient:
                 "grant_type": "authorization_code",
                 "code": code,
                 "code_verifier": code_verifier,
+                "state": state,
                 "client_id": self._client_id,
                 "redirect_uri": redirect_uri,
             },
