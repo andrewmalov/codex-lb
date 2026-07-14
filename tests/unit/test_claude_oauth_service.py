@@ -39,6 +39,7 @@ class _FakeOAuthClient:
     next_error: Exception | None = None
     last_code: str | None = None
     last_code_verifier: str | None = None
+    last_state: str | None = None
     last_redirect_uri: str | None = None
 
     async def exchange_authorization_code(
@@ -46,10 +47,12 @@ class _FakeOAuthClient:
         *,
         code: str,
         code_verifier: str,
+        state: str,
         redirect_uri: str,
     ) -> ClaudeAuthorizationCodeResult:
         self.last_code = code
         self.last_code_verifier = code_verifier
+        self.last_state = state
         self.last_redirect_uri = redirect_uri
         if self.next_error is not None:
             raise self.next_error
@@ -220,6 +223,7 @@ async def test_complete_oauth_happy_path_creates_account() -> None:
     assert client.last_code == "AUTH_CODE"
     assert client.last_redirect_uri == "https://r.example.test/cb"
     assert client.last_code_verifier and len(client.last_code_verifier) >= 43
+    assert client.last_state == started.state_token
 
     # Typed claims flowed into the auth manager
     assert mgr.last_access_token == "AT"
