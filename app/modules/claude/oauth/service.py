@@ -42,7 +42,9 @@ logger = logging.getLogger(__name__)
 
 
 class _OAuthClientPort(Protocol):
-    async def exchange_authorization_code(self, *, code: str, code_verifier: str, state: str, redirect_uri: str) -> Any: ...
+    async def exchange_authorization_code(
+        self, *, code: str, code_verifier: str, state: str, redirect_uri: str
+    ) -> Any: ...
 
 
 class _AuthManagerPort(Protocol):

@@ -120,7 +120,9 @@ async def test_exchange_authorization_code_invalid_grant_raises_auth_error(setti
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     with pytest.raises(ClaudeAuthError):
-        await client.exchange_authorization_code(code="BAD", code_verifier="V", state="S", redirect_uri="https://r.example/cb")
+        await client.exchange_authorization_code(
+            code="BAD", code_verifier="V", state="S", redirect_uri="https://r.example/cb"
+        )
 
 
 async def test_exchange_authorization_code_5xx_raises_upstream_error(settings: SimpleNamespace) -> None:
@@ -129,7 +131,9 @@ async def test_exchange_authorization_code_5xx_raises_upstream_error(settings: S
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     with pytest.raises(ClaudeUpstreamError):
-        await client.exchange_authorization_code(code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb")
+        await client.exchange_authorization_code(
+            code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb"
+        )
 
 
 async def test_exchange_authorization_code_malformed_body_raises_api_error(settings: SimpleNamespace) -> None:
@@ -138,4 +142,6 @@ async def test_exchange_authorization_code_malformed_body_raises_api_error(setti
     client = ClaudeOAuthClient(transport=t, settings=settings)
 
     with pytest.raises(ClaudeAPIError):
-        await client.exchange_authorization_code(code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb")
+        await client.exchange_authorization_code(
+            code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb"
+        )
