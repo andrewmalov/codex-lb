@@ -463,9 +463,7 @@ async def test_complete_oauth_anthropic_account_shape_response_succeeds() -> Non
         organization_name="kusanat5@gmail.com's Organization",
     )
 
-    resp = await svc.complete_oauth(
-        flow_id=started.flow_id, code="AUTH_CODE", state=started.state_token
-    )
+    resp = await svc.complete_oauth(flow_id=started.flow_id, code="AUTH_CODE", state=started.state_token)
 
     assert resp.status == "success"
     assert mgr.last_claims.claude_account_uuid == "491c2857-30eb-49ce-ad07-2b601efa041d"
@@ -542,9 +540,7 @@ async def test_complete_oauth_emits_callback_diagnostic_warning(caplog: pytest.L
     )
 
     with caplog.at_level(logging.WARNING, logger="app.modules.claude.oauth.service"):
-        await svc.complete_oauth(
-            flow_id=started.flow_id, code="SECRET_AUTH_CODE_123456", state=started.state_token
-        )
+        await svc.complete_oauth(flow_id=started.flow_id, code="SECRET_AUTH_CODE_123456", state=started.state_token)
 
     records = [r for r in caplog.records if r.message == "claude.oauth.flow.callback.diagnostic"]
     assert records, "expected diagnostic warning"

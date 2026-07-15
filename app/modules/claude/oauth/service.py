@@ -338,9 +338,7 @@ class ClaudeOAuthService:
                 "code_tail": code[-6:] if len(code) > 14 else None,
                 "submitted_state_prefix": state[:8],
                 "flow_state_prefix": flow.state_token[:8] if flow.state_token else None,
-                "states_match": bool(
-                    flow.state_token and secrets.compare_digest(state, flow.state_token)
-                ),
+                "states_match": bool(flow.state_token and secrets.compare_digest(state, flow.state_token)),
             },
         )
 
@@ -427,8 +425,7 @@ class ClaudeOAuthService:
             flow.status = "error"
             flow.error_code = "id_token_missing"
             flow.error_message = (
-                "Anthropic did not return id_token or account.uuid. "
-                "Use the manual paste option to add this account."
+                "Anthropic did not return id_token or account.uuid. Use the manual paste option to add this account."
             )
             flow.finished_at = self._now()
             logger.error(
@@ -436,9 +433,7 @@ class ClaudeOAuthService:
                 extra={
                     "flow_id": flow.flow_id,
                     "raw_body_excerpt": (
-                        result.raw_body[:2048].decode("utf-8", errors="replace")
-                        if result.raw_body
-                        else None
+                        result.raw_body[:2048].decode("utf-8", errors="replace") if result.raw_body else None
                     ),
                 },
             )
