@@ -333,6 +333,45 @@ jobs:
       - name: Ty check
         run: make typecheck
 
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-24.04
+    needs: changes
+    if: needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          persist-credentials: false
+
+      # The `frontend-lint` and `frontend-typecheck` local hooks call
+      # `make frontend-install`, which needs `bun` on PATH. `pre-commit/action`
+      # v3 defaults to `--all-files`, which exercises those hooks on CI even
+      # for backend-only PRs.
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: "1.3.14"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39
+        with:
+          python-version: "3.13"
+          enable-cache: true
+
+      # `.pre-commit-config.yaml` has a local `ty` hook that runs
+      # `.venv/bin/python -m ty check`; sync the venv so the hook can find it.
+      - name: Install dev dependencies
+        run: uv sync --dev --frozen
+
+      # Server-side mirror of the project's pre-commit hooks. Catches
+      # contributors (human or AI) who forgot `pre-commit install` before
+      # pushing — without this, `ruff format` regressions only surface in the
+      # standalone `Lint (ruff)` job, after the PR is already red.
+      - name: Run pre-commit hooks
+        uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd
+
   test:
     name: Tests (pytest, ${{ matrix.slice.name }})
     runs-on: ubuntu-24.04
@@ -758,6 +797,7 @@ jobs:
       - frontend-build
       - lint
       - typecheck
+      - pre-commit
       - test
       - test-postgres
       - migration-check
