@@ -54,9 +54,14 @@ class ClaudeRefreshResult:
 class ClaudeAuthorizationCodeResult:
     """Result of a successful authorization-code exchange.
 
-    ``id_token`` is ``None`` when Anthropic's token response omits it; the
-    downstream service treats the absence as a flow-level failure surfaced
-    via ``error_code="id_token_missing"`` (see claude-oauth-link design).
+    Anthropic's public Claude Code OAuth client does NOT return an OIDC
+    ``id_token`` JWT. Account identity is carried in plain JSON fields
+    ``account.uuid`` + ``account.email_address`` + ``organization.uuid``;
+    those are surfaced as ``account_uuid`` / ``account_email`` /
+    ``organization_uuid`` here. ``id_token`` is kept on the dataclass for
+    backward compatibility with deployments that DO return one. All
+    four identity fields default to ``None`` and the caller picks the
+    source.
 
     ``scope`` carries the raw space-separated string so callers can decide
     how to normalize it. ``None`` when the response omits the field.
@@ -67,6 +72,10 @@ class ClaudeAuthorizationCodeResult:
     id_token: str | None
     expires_in: int
     scope: str | None
+    account_uuid: str | None = None
+    account_email: str | None = None
+    organization_uuid: str | None = None
+    organization_name: str | None = None
     raw_body: bytes | None = None
 
 
@@ -235,8 +244,14 @@ def _parse_exchange_success_body(body: Any, *, raw_body: bytes | None = None) ->
     """Parse a 200 authorization-code-exchange response.
 
     Same error model as :func:`_parse_success_body` (used by ``refresh``),
-    but enforces ``refresh_token`` as required and treats ``id_token`` as
-    optional.
+    but enforces ``refresh_token`` as required and treats ``id_token``,
+    ``account.*``, and ``organization.*`` as optional.
+
+    Anthropic's public Claude Code OAuth client returns account identity in
+    plain JSON (``account.uuid`` + ``account.email_address`` +
+    ``organization.uuid``) rather than as an OIDC ``id_token`` JWT, so we
+    surface those fields on the result alongside ``id_token``. The caller
+    decides which to use.
     """
     if not isinstance(body, dict):
         raise ClaudeAPIError(f"malformed exchange response: {body!r}")
@@ -259,12 +274,36 @@ def _parse_exchange_success_body(body: Any, *, raw_body: bytes | None = None) ->
     if scope is not None and not isinstance(scope, str):
         raise ClaudeAPIError(f"scope must be string or null: {body!r}")
 
+    account = body.get("account")
+    if not isinstance(account, dict):
+        account = {}
+    organization = body.get("organization")
+    if not isinstance(organization, dict):
+        organization = {}
+
+    account_uuid = account.get("uuid")
+    if account_uuid is not None and not isinstance(account_uuid, str):
+        account_uuid = None
+    account_email = account.get("email_address")
+    if account_email is not None and not isinstance(account_email, str):
+        account_email = None
+    organization_uuid = organization.get("uuid")
+    if organization_uuid is not None and not isinstance(organization_uuid, str):
+        organization_uuid = None
+    organization_name = organization.get("name")
+    if organization_name is not None and not isinstance(organization_name, str):
+        organization_name = None
+
     return ClaudeAuthorizationCodeResult(
         access_token=access_token,
         refresh_token=refresh_token,
         id_token=id_token,
         expires_in=expires_in,
         scope=scope,
+        account_uuid=account_uuid,
+        account_email=account_email,
+        organization_uuid=organization_uuid,
+        organization_name=organization_name,
         raw_body=raw_body,
     )
 

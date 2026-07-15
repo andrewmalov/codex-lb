@@ -298,6 +298,52 @@ class ClaudeOAuthService:
                 http_status=400,
             )
 
+        # Parse Anthropic's OOB `code#state` paste format. The dashboard
+        # dialog tells the operator to paste "the code", but Anthropic's
+        # authorize page renders the response as `<code>#<state>` and most
+        # operators copy/paste that whole string. Without this branch the
+        # full `code#state` string is sent as the `code` field to the token
+        # endpoint and Anthropic returns ``invalid_grant``. Plain codes
+        # (no `#`) flow through unchanged — see the spec delta
+        # ``code#state paste acceptance`` for the contract.
+        if "#" in code:
+            code_part, state_part = code.split("#", 1)
+            state_part = state_part.strip()
+            if not secrets.compare_digest(state_part, flow.state_token or ""):
+                flow.status = "error"
+                flow.error_code = "state_mismatch"
+                flow.error_message = "code#state state does not match the stored token."
+                flow.finished_at = self._now()
+                logger.warning(
+                    "claude.oauth.flow.callback",
+                    extra={"flow_id": flow.flow_id, "status": "error", "error_code": flow.error_code},
+                )
+                raise ClaudeOauthFlowError(
+                    "state_mismatch",
+                    flow.error_message,
+                    http_status=400,
+                )
+            code = code_part.strip()
+
+        # Diagnostic: emitted on every callback. Captures the values being
+        # exchanged so a future ``invalid_grant`` from Anthropic can be
+        # attributed to: stale code, wrong clipboard paste, browser autofill
+        # reusing a previous code, or a genuine Anthropic mismatch.
+        logger.warning(
+            "claude.oauth.flow.callback.diagnostic",
+            extra={
+                "flow_id": flow.flow_id,
+                "code_len": len(code),
+                "code_head": code[:8],
+                "code_tail": code[-6:] if len(code) > 14 else None,
+                "submitted_state_prefix": state[:8],
+                "flow_state_prefix": flow.state_token[:8] if flow.state_token else None,
+                "states_match": bool(
+                    flow.state_token and secrets.compare_digest(state, flow.state_token)
+                ),
+            },
+        )
+
         if self._oauth_client is None or self._auth_manager is None:
             # The service is constructed without collaborators only by tests
             # that exercise the ``start`` / ``status`` paths in isolation.
@@ -339,31 +385,68 @@ class ClaudeOAuthService:
                 http_status=502,
             ) from exc
 
-        if not result.id_token:
+        # Account identity construction. Anthropic's public Claude Code
+        # OAuth client does NOT return an OIDC ``id_token``; the
+        # ``account.uuid`` / ``account.email_address`` /
+        # ``organization.uuid`` JSON fields are the source of truth. The
+        # OAuth client surfaces both via ``ClaudeAuthorizationCodeResult``
+        # and we accept either. ``id_token_missing`` is reserved for the
+        # case where neither source is present (genuinely no identity).
+        if result.id_token:
+            try:
+                claims = decode_id_token(result.id_token)
+            except ClaudeOauthIdTokenError as exc:
+                flow.status = "error"
+                flow.error_code = exc.code
+                flow.error_message = str(exc)
+                flow.finished_at = self._now()
+                raise ClaudeOauthFlowError(
+                    exc.code,
+                    str(exc),
+                    http_status=400,
+                ) from exc
+        elif result.account_uuid and result.account_email:
+            scopes_list: list[str] | None = None
+            if result.scope:
+                scopes_list = [s for s in result.scope.split() if s]
+            claims = ClaudeOauthClaims(
+                claude_account_uuid=result.account_uuid,
+                user_email=result.account_email,
+                user_organization_uuid=result.organization_uuid,
+                scopes=scopes_list,
+                raw_claims={
+                    "source": "anthropic_token_response",
+                    "account_uuid": result.account_uuid,
+                    "account_email": result.account_email,
+                    "organization_uuid": result.organization_uuid,
+                    "organization_name": result.organization_name,
+                    "scope": result.scope,
+                },
+            )
+        else:
             flow.status = "error"
             flow.error_code = "id_token_missing"
             flow.error_message = (
-                "Anthropic did not return an id_token. Use the manual paste option to add this account."
+                "Anthropic did not return id_token or account.uuid. "
+                "Use the manual paste option to add this account."
             )
             flow.finished_at = self._now()
+            logger.error(
+                "claude.oauth.flow.id_token_missing",
+                extra={
+                    "flow_id": flow.flow_id,
+                    "raw_body_excerpt": (
+                        result.raw_body[:2048].decode("utf-8", errors="replace")
+                        if result.raw_body
+                        else None
+                    ),
+                },
+            )
             raise ClaudeOauthFlowError(
                 "id_token_missing",
                 flow.error_message,
                 http_status=400,
             )
-
-        try:
-            claims = decode_id_token(result.id_token)
-        except ClaudeOauthIdTokenError as exc:
-            flow.status = "error"
-            flow.error_code = exc.code
-            flow.error_message = str(exc)
-            flow.finished_at = self._now()
-            raise ClaudeOauthFlowError(
-                exc.code,
-                str(exc),
-                http_status=400,
-            ) from exc
 
         try:
             account_id = await self._auth_manager.add_claude_account_from_oauth(

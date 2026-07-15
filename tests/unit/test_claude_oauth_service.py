@@ -365,6 +365,226 @@ async def test_complete_oauth_logs_no_secrets(caplog: pytest.LogCaptureFixture) 
 
 
 # ---------------------------------------------------------------------------
+# code#state paste format (see openspec/changes/fix-claude-oauth-account-claims)
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_oauth_code_state_paste_with_matching_state_succeeds() -> None:
+    """Anthropic's OOB page renders the response as ``<code>#<state>``. Operators
+    paste that whole string into the dialog. The service MUST split on the
+    first ``#``, validate the state segment against the flow's stored
+    ``state_token``, and use only the code segment for the exchange.
+    """
+    svc, client, mgr = _make_service()
+    started = await svc.start_oauth()
+    client.next_result = ClaudeAuthorizationCodeResult(
+        access_token="AT",
+        refresh_token="RT",
+        id_token=_id_token({"account_id": "acct-1"}),
+        expires_in=3600,
+        scope="user:inference",
+    )
+
+    resp = await svc.complete_oauth(
+        flow_id=started.flow_id,
+        code=f"AUTH_CODE#{started.state_token}",
+        state=started.state_token,
+    )
+
+    assert resp.status == "success"
+    # Client received only the code half, not the state half.
+    assert client.last_code == "AUTH_CODE"
+    assert client.last_state == started.state_token
+    assert mgr.last_claims.claude_account_uuid == "acct-1"
+
+
+async def test_complete_oauth_code_state_paste_with_mismatched_state_raises_state_mismatch() -> None:
+    """If the state segment of ``code#state`` does not equal the flow's
+    stored ``state_token``, the callback MUST reject with HTTP 400 and
+    ``state_mismatch`` (and MUST NOT call the token endpoint).
+    """
+    svc, client, _ = _make_service()
+    started = await svc.start_oauth()
+
+    with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
+        await svc.complete_oauth(
+            flow_id=started.flow_id,
+            code="AUTH_CODE#SOMEONE_ELSES_STATE",
+            state=started.state_token,
+        )
+    assert exc.value.code == "state_mismatch"
+    assert client.last_code is None, "token endpoint MUST NOT be called"
+
+
+async def test_complete_oauth_code_state_paste_with_whitespace_state_trimmed() -> None:
+    """Trailing whitespace on the state segment (copied from Anthropic's
+    page with stray newlines) MUST be tolerated via ``strip()``.
+    """
+    svc, client, _ = _make_service()
+    started = await svc.start_oauth()
+    client.next_result = ClaudeAuthorizationCodeResult(
+        access_token="AT",
+        refresh_token="RT",
+        id_token=_id_token({"account_id": "acct-1"}),
+        expires_in=3600,
+        scope="x",
+    )
+
+    resp = await svc.complete_oauth(
+        flow_id=started.flow_id,
+        code=f"AUTH_CODE#{started.state_token}  \n",
+        state=started.state_token,
+    )
+    assert resp.status == "success"
+
+
+# ---------------------------------------------------------------------------
+# Anthropic account-shape response (see openspec/changes/fix-claude-oauth-account-claims)
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_oauth_anthropic_account_shape_response_succeeds() -> None:
+    """Anthropic's actual token response carries identity in
+    ``account.uuid`` + ``account.email_address`` + ``organization.uuid`` and
+    does NOT include an ``id_token``. The service MUST accept this shape
+    and build ``ClaudeOauthClaims`` directly from the JSON fields.
+    """
+    svc, client, mgr = _make_service()
+    started = await svc.start_oauth()
+    client.next_result = ClaudeAuthorizationCodeResult(
+        access_token="sk-ant-oat01-AT",
+        refresh_token="sk-ant-ort01-RT",
+        id_token=None,
+        expires_in=28800,
+        scope="user:inference user:profile",
+        account_uuid="491c2857-30eb-49ce-ad07-2b601efa041d",
+        account_email="kusanat5@gmail.com",
+        organization_uuid="cb355b7e-1b37-441c-8e2f-6f230a65a773",
+        organization_name="kusanat5@gmail.com's Organization",
+    )
+
+    resp = await svc.complete_oauth(
+        flow_id=started.flow_id, code="AUTH_CODE", state=started.state_token
+    )
+
+    assert resp.status == "success"
+    assert mgr.last_claims.claude_account_uuid == "491c2857-30eb-49ce-ad07-2b601efa041d"
+    assert mgr.last_claims.user_email == "kusanat5@gmail.com"
+    assert mgr.last_claims.user_organization_uuid == "cb355b7e-1b37-441c-8e2f-6f230a65a773"
+    assert mgr.last_claims.scopes == ["user:inference", "user:profile"]
+    # raw_claims preserves the source so downstream consumers can audit
+    assert mgr.last_claims.raw_claims["source"] == "anthropic_token_response"
+
+
+async def test_complete_oauth_no_id_token_and_no_account_raises_id_token_missing() -> None:
+    """Genuine "no identity payload" — neither ``id_token`` nor
+    ``account.uuid`` + ``account.email_address`` — still raises
+    ``id_token_missing``. The error_code contract is unchanged for this
+    case; only the account-shape fallback is new.
+    """
+    svc, client, _ = _make_service()
+    started = await svc.start_oauth()
+    client.next_result = ClaudeAuthorizationCodeResult(
+        access_token="AT",
+        refresh_token="RT",
+        id_token=None,
+        expires_in=3600,
+        scope="x",
+        # account_uuid / account_email default to None → no identity payload
+    )
+
+    with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
+        await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
+    assert exc.value.code == "id_token_missing"
+
+
+async def test_complete_oauth_account_shape_missing_email_still_raises_id_token_missing() -> None:
+    """Account UUID present but no email → not enough to identify the
+    account. Raise ``id_token_missing`` (preserves the contract that the
+    service surfaces the missing-identity condition consistently).
+    """
+    svc, client, _ = _make_service()
+    started = await svc.start_oauth()
+    client.next_result = ClaudeAuthorizationCodeResult(
+        access_token="AT",
+        refresh_token="RT",
+        id_token=None,
+        expires_in=3600,
+        scope="x",
+        account_uuid="491c2857-30eb-49ce-ad07-2b601efa041d",
+        # account_email omitted
+    )
+
+    with pytest.raises(service_module.ClaudeOauthFlowError) as exc:
+        await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
+    assert exc.value.code == "id_token_missing"
+
+
+# ---------------------------------------------------------------------------
+# Diagnostic logging (see openspec/changes/fix-claude-oauth-account-claims)
+# ---------------------------------------------------------------------------
+
+
+async def test_complete_oauth_emits_callback_diagnostic_warning(caplog: pytest.LogCaptureFixture) -> None:
+    """``claude.oauth.flow.callback.diagnostic`` MUST fire on every callback
+    with flow_id, code length, code head/tail, state prefix, and the
+    bool states_match flag. Surfaces as ``extra={...}`` so the production
+    JSON formatter preserves structured fields.
+    """
+    svc, client, _ = _make_service()
+    started = await svc.start_oauth()
+    client.next_result = ClaudeAuthorizationCodeResult(
+        access_token="AT",
+        refresh_token="RT",
+        id_token=_id_token({"account_id": "x"}),
+        expires_in=3600,
+        scope="x",
+    )
+
+    with caplog.at_level(logging.WARNING, logger="app.modules.claude.oauth.service"):
+        await svc.complete_oauth(
+            flow_id=started.flow_id, code="SECRET_AUTH_CODE_123456", state=started.state_token
+        )
+
+    records = [r for r in caplog.records if r.message == "claude.oauth.flow.callback.diagnostic"]
+    assert records, "expected diagnostic warning"
+    rec = records[0]
+    assert getattr(rec, "flow_id") == started.flow_id
+    assert getattr(rec, "code_len") == len("SECRET_AUTH_CODE_123456")
+    assert getattr(rec, "code_head") == "SECRET_A"
+    # state values are 43-char token_urlsafe; check prefix matches
+    assert getattr(rec, "flow_state_prefix") == started.state_token[:8]
+    assert getattr(rec, "submitted_state_prefix") == started.state_token[:8]
+    assert getattr(rec, "states_match") is True
+
+
+async def test_complete_oauth_id_token_missing_emits_raw_body_log(caplog: pytest.LogCaptureFixture) -> None:
+    """``id_token_missing`` MUST also emit
+    ``claude.oauth.flow.id_token_missing`` with the raw response body
+    excerpt so the next incident is root-causible from logs alone.
+    """
+    svc, client, _ = _make_service()
+    started = await svc.start_oauth()
+    raw = b'{"access_token":"AT","refresh_token":"RT","expires_in":3600}'
+    client.next_result = ClaudeAuthorizationCodeResult(
+        access_token="AT",
+        refresh_token="RT",
+        id_token=None,
+        expires_in=3600,
+        scope="x",
+        raw_body=raw,
+    )
+
+    with caplog.at_level(logging.ERROR, logger="app.modules.claude.oauth.service"):
+        with pytest.raises(service_module.ClaudeOauthFlowError):
+            await svc.complete_oauth(flow_id=started.flow_id, code="C", state=started.state_token)
+
+    records = [r for r in caplog.records if r.message == "claude.oauth.flow.id_token_missing"]
+    assert records, "expected id_token_missing error log"
+    assert getattr(records[0], "raw_body_excerpt") == raw.decode("utf-8")
+
+
+# ---------------------------------------------------------------------------
 # claude-oauth-link endpoints (see openspec/changes/fix-claude-oauth-link-endpoints)
 # ---------------------------------------------------------------------------
 

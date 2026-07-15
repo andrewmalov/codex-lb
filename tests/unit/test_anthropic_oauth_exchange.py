@@ -145,3 +145,109 @@ async def test_exchange_authorization_code_malformed_body_raises_api_error(setti
         await client.exchange_authorization_code(
             code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb"
         )
+
+
+# ---------------------------------------------------------------------------
+# Anthropic actual-shape response (no id_token, identity in account.* /
+# organization.*) — see openspec/changes/fix-claude-oauth-account-claims
+# ---------------------------------------------------------------------------
+
+
+async def test_exchange_authorization_code_populates_account_shape_fields(settings: SimpleNamespace) -> None:
+    """Anthropic's actual token response carries identity in
+    ``account.{uuid, email_address}`` + ``organization.{uuid, name}``,
+    not in an OIDC id_token. The OAuth client must surface those fields
+    so the service can build ``ClaudeOauthClaims`` without id_token.
+    """
+    resp = _Response(
+        status=200,
+        body={
+            "token_type": "Bearer",
+            "access_token": "sk-ant-oat01-AT",
+            "expires_in": 28800,
+            "refresh_token": "sk-ant-ort01-RT",
+            "scope": "user:inference user:profile",
+            "token_uuid": "7f7a49a7-dd42-4f17-96fc-d8f115cd68f5",
+            "refresh_token_expires_in": 2502728,
+            "organization": {
+                "uuid": "cb355b7e-1b37-441c-8e2f-6f230a65a773",
+                "name": "kusanat5@gmail.com's Organization",
+            },
+            "account": {
+                "uuid": "491c2857-30eb-49ce-ad07-2b601efa041d",
+                "email_address": "kusanat5@gmail.com",
+            },
+        },
+    )
+    t = _Transport(resp)
+    client = ClaudeOAuthClient(transport=t, settings=settings)
+
+    out = await client.exchange_authorization_code(
+        code="AUTH_CODE", code_verifier="V", state="S", redirect_uri="https://r.example/cb"
+    )
+
+    assert out.id_token is None
+    assert out.account_uuid == "491c2857-30eb-49ce-ad07-2b601efa041d"
+    assert out.account_email == "kusanat5@gmail.com"
+    assert out.organization_uuid == "cb355b7e-1b37-441c-8e2f-6f230a65a773"
+    assert out.organization_name == "kusanat5@gmail.com's Organization"
+    # Required fields stay populated
+    assert out.access_token == "sk-ant-oat01-AT"
+    assert out.refresh_token == "sk-ant-ort01-RT"
+    assert out.expires_in == 28800
+    assert out.scope == "user:inference user:profile"
+
+
+async def test_exchange_authorization_code_account_shape_backward_compat(settings: SimpleNamespace) -> None:
+    """A body without ``account`` / ``organization`` keys (legacy) leaves
+    the new fields ``None`` and id_token untouched.
+    """
+    resp = _Response(
+        status=200,
+        body={
+            "access_token": "AT",
+            "refresh_token": "RT",
+            "id_token": "JWT.PAYLOAD.SIG",
+            "expires_in": 3600,
+        },
+    )
+    t = _Transport(resp)
+    client = ClaudeOAuthClient(transport=t, settings=settings)
+
+    out = await client.exchange_authorization_code(
+        code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb"
+    )
+
+    assert out.id_token == "JWT.PAYLOAD.SIG"
+    assert out.account_uuid is None
+    assert out.account_email is None
+    assert out.organization_uuid is None
+    assert out.organization_name is None
+
+
+async def test_exchange_authorization_code_tolerates_malformed_account_org(settings: SimpleNamespace) -> None:
+    """``account`` or ``organization`` being null/non-dict must not raise;
+    the client treats any of these as "no identity payload" (all four
+    new fields ``None``).
+    """
+    for bad in (None, "not-a-dict", 42, ["list"]):
+        resp = _Response(
+            status=200,
+            body={
+                "access_token": "AT",
+                "refresh_token": "RT",
+                "expires_in": 3600,
+                "account": bad,
+                "organization": bad,
+            },
+        )
+        t = _Transport(resp)
+        client = ClaudeOAuthClient(transport=t, settings=settings)
+
+        out = await client.exchange_authorization_code(
+            code="C", code_verifier="V", state="S", redirect_uri="https://r.example/cb"
+        )
+        assert out.account_uuid is None
+        assert out.account_email is None
+        assert out.organization_uuid is None
+        assert out.organization_name is None
