@@ -350,3 +350,227 @@ async def test_fetch_with_failover_does_not_warn_after_successful_auth_retry(
     assert result.account_models == {account.id: (account.plan_type, expected_models)}
     assert fetch_models_for_plan.await_count == 2
     assert "Model fetch failed" not in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Provider scope — openspec/changes/fix-model-refresh-scheduler-provider-scope
+# ---------------------------------------------------------------------------
+
+
+def _claude_account(account_id: str = "claude-account-1") -> Account:
+    return Account(
+        id=account_id,
+        email=f"{account_id}@example.test",
+        plan_type="claude_subscription",
+        provider="claude",
+        chatgpt_account_id=None,
+        claude_account_uuid=f"claude-uuid-{account_id}",
+        claude_user_email=f"{account_id}@example.test",
+        claude_user_organization_uuid=None,
+        access_token_encrypted=b"encrypted-claude-access-token",
+        refresh_token_encrypted=b"encrypted-claude-refresh-token",
+        claude_access_token_encrypted=b"encrypted-claude-access-token",
+        claude_refresh_token_encrypted=b"encrypted-claude-refresh-token",
+        last_refresh=datetime(2026, 1, 1),
+        status=AccountStatus.ACTIVE,
+    )
+
+
+async def test_fetch_with_failover_uses_injected_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The fetcher kwarg on `_fetch_with_failover` MUST be honored —
+    this is the hook that routes Claude accounts to
+    ``fetch_claude_models`` and away from the Codex upstream.
+    """
+    claude_account = _claude_account("claude-1")
+    claude_models = [_model("claude-opus-4-20250514")]
+
+    codex_fetcher = AsyncMock(side_effect=AssertionError("Codex fetcher MUST NOT be called for Claude accounts"))
+    claude_fetcher = AsyncMock(return_value=claude_models)
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_fetcher)
+
+    encryptor = MagicMock()
+    encryptor.decrypt.return_value = "sk-ant-oat01-AT"
+
+    result = await scheduler_module._fetch_with_failover(
+        [claude_account],
+        encryptor,
+        MagicMock(),
+        fetcher=claude_fetcher,
+    )
+
+    assert result is not None
+    assert [m.slug for m in result.models] == ["claude-opus-4-20250514"]
+    assert result.account_models == {claude_account.id: ("claude_subscription", claude_models)}
+    claude_fetcher.assert_awaited_once()
+    codex_fetcher.assert_not_called()
+
+
+async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: ``_refresh_once`` MUST iterate by provider — Codex accounts
+    go through ``fetch_models_for_plan``, Claude accounts through
+    ``fetch_claude_models``. A cross-provider leak (Codex fetcher called
+    with Claude bearer) was the 2026-07-15 incident.
+    """
+    codex_account = _account("codex-1")
+    codex_account.provider = "codex"
+    claude_account = _claude_account("claude-1")
+
+    codex_fetcher = AsyncMock(return_value=[_model("gpt-5.4")])
+    claude_fetcher = AsyncMock(return_value=[_model("claude-opus-4-20250514")])
+
+    accounts_repo = MagicMock()
+    accounts_repo.list_accounts_by_provider = AsyncMock(
+        side_effect=lambda provider: {
+            "codex": [codex_account],
+            "claude": [claude_account],
+        }[provider]
+    )
+
+    registry = MagicMock()
+    registry.update = AsyncMock()
+
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_fetcher)
+    monkeypatch.setattr(scheduler_module, "fetch_claude_models", claude_fetcher)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: registry)
+
+    @contextlib.asynccontextmanager
+    async def session_ctx():
+        # The scheduler does ``AccountsRepository(session)`` which calls
+        # ``session.execute(stmt)``. Provide a session whose ``execute``
+        # is an AsyncMock so the real ``list_accounts_by_provider`` works.
+        session = MagicMock()
+
+        async def _execute(_stmt: object) -> MagicMock:
+            result = MagicMock()
+            provider_accounts = {
+                "codex": [codex_account],
+                "claude": [claude_account],
+            }
+            # The repository's list_accounts_by_provider looks at
+            # ``Account.provider == provider``; we short-circuit by
+            # returning scalars_for_provider via the stmt argument.
+            # Easier: bypass the real repo and let the test inject via
+            # monkeypatch on the repo's method (already set below).
+            result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+            return result
+
+        session.execute = AsyncMock(side_effect=_execute)
+        yield session
+
+    # Patch the repository method that the scheduler calls so we don't
+    # have to drive a real SQLAlchemy session through execute().
+    def _list_by_provider(provider: str) -> list[Account]:
+        if provider == "codex":
+            return [codex_account]
+        if provider == "claude":
+            return [claude_account]
+        return []
+
+    @contextlib.asynccontextmanager
+    async def repo_ctx() -> object:
+        yield MagicMock(list_accounts_by_provider=AsyncMock(side_effect=_list_by_provider))
+
+    # The scheduler does ``async with get_background_session() as session:
+    # accounts_repo = AccountsRepository(session)``. We need both to
+    # play nice. Provide a session whose ``execute`` returns an empty
+    # scalars (we won't reach it because we monkeypatch the repo method
+    # after the scheduler constructs the AccountsRepository instance).
+
+    # Easier approach: monkeypatch the AccountsRepository class so its
+    # constructor returns our preconfigured repo.
+    class _FakeRepo:
+        def __init__(self, _session: object) -> None:
+            self.list_accounts_by_provider = AsyncMock(side_effect=_list_by_provider)
+
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _FakeRepo)
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_fetcher)
+    monkeypatch.setattr(scheduler_module, "fetch_claude_models", claude_fetcher)
+    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: registry)
+
+    @contextlib.asynccontextmanager
+    async def session_ctx2():
+        yield MagicMock()
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", session_ctx2)
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: MagicMock(decrypt=lambda b: "decrypted"))
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _AlwaysLeader())
+    monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+    await scheduler._refresh_once()
+
+    codex_fetcher.assert_awaited_once()
+    claude_fetcher.assert_awaited_once()
+    # Each fetcher was called with its own account only.
+    assert codex_fetcher.await_args.args[1] == codex_account.chatgpt_account_id
+    assert claude_fetcher.await_args.args[1] is None  # claude fetcher ignores account_id
+
+    registry.update.assert_awaited_once()
+    call = registry.update.await_args
+    args = call.args
+    kwargs = call.kwargs
+    per_plan_results = kwargs.get("per_plan_results") if "per_plan_results" in kwargs else (args[0] if args else None)
+    active_account_plans = kwargs.get("active_account_plans") if "active_account_plans" in kwargs else (
+        args[1] if len(args) > 1 else None
+    )
+    assert per_plan_results is not None, f"registry.update called with args={args} kwargs={kwargs}"
+    assert "gpt-5.4" in per_plan_results["team"][0].slug
+    assert "claude-opus-4-20250514" in per_plan_results["claude_subscription"][0].slug
+    assert active_account_plans[codex_account.id] == "team"
+    assert active_account_plans[claude_account.id] == "claude_subscription"
+
+
+async def test_refresh_once_skips_provider_with_no_accounts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If a provider has no accounts, its fetcher MUST NOT be called —
+    no surprise network traffic for empty partitions.
+    """
+    codex_fetcher = AsyncMock(side_effect=AssertionError("Codex fetcher MUST NOT be called when there are no accounts"))
+    claude_fetcher = AsyncMock(side_effect=AssertionError("Claude fetcher MUST NOT be called when there are no accounts"))
+
+    class _FakeRepoEmpty:
+        def __init__(self, _session: object) -> None:
+            self.list_accounts_by_provider = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(scheduler_module, "AccountsRepository", _FakeRepoEmpty)
+    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_fetcher)
+    monkeypatch.setattr(scheduler_module, "fetch_claude_models", claude_fetcher)
+
+    @contextlib.asynccontextmanager
+    async def session_ctx():
+        yield MagicMock()
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", session_ctx)
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: MagicMock())
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _AlwaysLeader())
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+    await scheduler._refresh_once()
+
+    codex_fetcher.assert_not_called()
+    claude_fetcher.assert_not_called()
+
+    @contextlib.asynccontextmanager
+    async def session_ctx():
+        yield MagicMock()
+
+    monkeypatch.setattr(scheduler_module, "get_background_session", session_ctx)
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: MagicMock())
+    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _AlwaysLeader())
+
+    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
+    await scheduler._refresh_once()
+
+    codex_fetcher.assert_not_called()
+    claude_fetcher.assert_not_called()
+
+
+class _AlwaysLeader:
+    async def try_acquire(self) -> bool:
+        return True

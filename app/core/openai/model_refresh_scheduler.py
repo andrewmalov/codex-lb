@@ -5,11 +5,15 @@ import contextlib
 import importlib
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Awaitable, Callable, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.http import refresh_http_client
-from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
+from app.core.clients.model_fetcher import (
+    ModelFetchError,
+    fetch_claude_models,
+    fetch_models_for_plan,
+)
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import (
@@ -86,46 +90,55 @@ class ModelRefreshScheduler:
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
-                accounts = await accounts_repo.list_accounts()
-                grouped = _group_by_plan(accounts)
-                if not grouped:
-                    logger.debug("No active accounts for model registry refresh")
-                    return
-
                 encryptor = TokenEncryptor()
                 per_plan_results: dict[str, list[UpstreamModel]] = {}
                 per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
                 active_account_plans: dict[str, str] = {}
 
-                for plan_type, candidates in grouped.items():
-                    for account in candidates:
-                        active_account_plans[account.id] = plan_type
-                    result = await _fetch_with_failover(
-                        candidates,
-                        encryptor,
-                        accounts_repo,
-                    )
-                    if result is not None:
-                        per_plan_results[plan_type] = result.models
-                        per_account_results.update(result.account_models)
+                # Provider-scoped fetch — see
+                # openspec/changes/fix-model-refresh-scheduler-provider-scope.
+                # A Claude OAuth bearer MUST NOT be sent to the Codex upstream
+                # ``/codex/models`` endpoint (Anthropic returns 401, the
+                # scheduler marks the Claude account ``reauth_required``).
+                for provider, fetcher in (
+                    ("codex", fetch_models_for_plan),
+                    ("claude", fetch_claude_models),
+                ):
+                    candidates = await accounts_repo.list_accounts_by_provider(provider)
+                    if not candidates:
+                        continue
+                    grouped = _group_by_plan(candidates)
+                    for plan_type, plan_candidates in grouped.items():
+                        for account in plan_candidates:
+                            active_account_plans[account.id] = plan_type
+                        result = await _fetch_with_failover(
+                            plan_candidates,
+                            encryptor,
+                            accounts_repo,
+                            fetcher=fetcher,
+                        )
+                        if result is not None:
+                            per_plan_results[plan_type] = result.models
+                            per_account_results.update(result.account_models)
 
-                if per_plan_results:
-                    registry = get_model_registry()
-                    await registry.update(
-                        per_plan_results,
-                        per_account_results=per_account_results,
-                        active_account_plans=active_account_plans,
-                    )
-                    snapshot = registry.get_snapshot()
-                    total_models = len(snapshot.models) if snapshot else 0
-                    logger.info(
-                        "Model registry refreshed plans=%d total_models=%d",
-                        len(per_plan_results),
-                        total_models,
-                    )
-                    get_account_selection_cache().invalidate()
-                else:
-                    logger.warning("Model registry refresh failed for all plans")
+                if not per_plan_results:
+                    logger.debug("No active accounts for model registry refresh")
+                    return
+
+                registry = get_model_registry()
+                await registry.update(
+                    per_plan_results,
+                    per_account_results=per_account_results,
+                    active_account_plans=active_account_plans,
+                )
+                snapshot = registry.get_snapshot()
+                total_models = len(snapshot.models) if snapshot else 0
+                logger.info(
+                    "Model registry refreshed plans=%d total_models=%d",
+                    len(per_plan_results),
+                    total_models,
+                )
+                get_account_selection_cache().invalidate()
         except Exception:
             logger.exception("Model registry refresh loop failed")
 
@@ -168,7 +181,20 @@ async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
     accounts_repo: AccountsRepository,
+    *,
+    fetcher: Callable[..., Awaitable[list[UpstreamModel]]] | None = None,
 ) -> _FetchResult | None:
+    """Iterate ``candidates`` and call the per-account fetcher.
+
+    ``fetcher`` defaults to :func:`fetch_models_for_plan` (the existing
+    Codex upstream path). The model refresh scheduler passes
+    :func:`fetch_claude_models` for Claude-provider accounts so a Claude
+    bearer is sent to ``{claude_api_base_url}/v1/models``, never to
+    ``/codex/models``. See
+    ``openspec/changes/fix-model-refresh-scheduler-provider-scope``.
+    """
+    if fetcher is None:
+        fetcher = fetch_models_for_plan
     transport_recovery = _TransportRecoveryState()
     successful_results: list[list[UpstreamModel]] = []
     account_models: dict[str, tuple[str, list[UpstreamModel]]] = {}
@@ -185,6 +211,7 @@ async def _fetch_with_failover(
                 account,
                 encryptor,
                 transport_recovery=transport_recovery,
+                fetcher=fetcher,
             )
             successful_results.append(models)
             account_models[account.id] = (account.plan_type, models)
@@ -201,6 +228,7 @@ async def _fetch_with_failover(
                         account,
                         encryptor,
                         transport_recovery=transport_recovery,
+                        fetcher=fetcher,
                     )
                     successful_results.append(models)
                     account_models[account.id] = (account.plan_type, models)
@@ -287,13 +315,23 @@ async def _fetch_models_with_transport_recovery(
     encryptor: TokenEncryptor,
     *,
     transport_recovery: _TransportRecoveryState,
+    fetcher: Callable[..., Awaitable[list[UpstreamModel]]] | None = None,
 ) -> list[UpstreamModel]:
+    """Fetch models for one account, with one transport-error retry.
+
+    ``fetcher`` defaults to :func:`fetch_models_for_plan` (Codex).
+    The scheduler passes :func:`fetch_claude_models` for
+    ``Account.provider == 'claude'`` rows so the bearer is sent to the
+    right upstream — see ``openspec/changes/fix-model-refresh-scheduler-provider-scope``.
+    """
+    if fetcher is None:
+        fetcher = fetch_models_for_plan
     access_token = encryptor.decrypt(account.access_token_encrypted)
     account_id = account.chatgpt_account_id
     route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
 
     try:
-        return await fetch_models_for_plan(
+        return await fetcher(
             access_token,
             account_id,
             route=route,
@@ -308,7 +346,7 @@ async def _fetch_models_with_transport_recovery(
         access_token = encryptor.decrypt(account.access_token_encrypted)
         account_id = account.chatgpt_account_id
         route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
-        return await fetch_models_for_plan(
+        return await fetcher(
             access_token,
             account_id,
             route=route,
