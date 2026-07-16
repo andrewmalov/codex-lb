@@ -31,7 +31,6 @@ New function:
 ```python
 async def fetch_claude_models(
     access_token: str,
-    account_id: str | None,
     *,
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
@@ -49,6 +48,11 @@ async def fetch_claude_models(
     # ... rest mirrors fetch_models_for_plan with ModelFetchError shape.
 ```
 
+Note the absence of the ``account_id`` parameter: the Claude OAuth pool
+has no Codex-style ``chatgpt_account_id`` and Anthropic rejects the
+``chatgpt-account-id`` header. The scheduler's fetcher dispatch surfaces
+this asymmetry via a ``fetcher_takes_account_id`` kwarg (see task 5).
+
 Parse `{"data": [{"id": ..., "display_name": ...}, ...]}` to `UpstreamModel`.
 On 401 → `ModelFetchError(status=401, ...)`; on timeout / transport
 failure → `ModelFetchError(..., transport_error=True)`.
@@ -57,7 +61,7 @@ failure → `ModelFetchError(..., transport_error=True)`.
 JSON yields `UpstreamModel` entries; a 401 response surfaces as
 `ModelFetchError(401, ...)`.
 
-## 3. Wire Claude fetcher into scheduler
+## 3. Wire Claude fetcher AND Claude auth manager into scheduler
 
 **File:** `app/core/openai/model_refresh_scheduler.py`
 
@@ -70,24 +74,36 @@ if claude_accounts:
         candidates=claude_accounts,
         encryptor=encryptor,
         accounts_repo=accounts_repo,
-        fetcher=fetch_claude_models,   # new kwarg on _fetch_with_failover
+        fetcher=fetch_claude_models,                         # new kwarg
+        auth_manager_factory=claude_auth_manager_factory,    # provider-scoped
     )
     if claude_result is not None:
         per_plan_results.update(claude_result.models)        # plan_type == "claude_subscription"
         per_account_results.update(claude_result.account_models)
 ```
 
-`_fetch_with_failover` gains a `fetcher: Callable` parameter (default
-`fetch_models_for_plan`) so the same failover loop serves both providers.
-The 401 → refresh-retry path stays identical — Claude's refresh path is
-already implemented in `ClaudeAuthManager._run_refresh`; the scheduler
-already calls `auth_manager` correctly because the Account row carries a
-`provider` discriminator and the right auth manager is selected upstream
-in `proxy/load_balancer.py` and `claude/auth_manager.py`.
+`_fetch_with_failover` gains two parameters:
+
+- `fetcher: Callable` (default `fetch_models_for_plan`) — same failover
+  loop serves both providers.
+- `auth_manager_factory: Callable[[AccountsRepository], _AuthManagerLike]`
+  (default `_default_auth_manager_factory`) — picks the Codex
+  ``AuthManager`` for Codex accounts and a Claude-aware
+  ``_ClaudeAuthManagerAdapter`` for Claude accounts.
+
+The Codex auth manager's ``refresh_account`` reads
+``refresh_token_encrypted``, which for Claude rows is the
+``encrypt("claude")`` placeholder. The Claude adapter is a thin
+Protocol shim that satisfies
+``ensure_fresh(account, *, force=False) -> Account`` without invoking
+Codex logic; Claude OAuth rotation is owned by the dedicated
+``app.core.auth.guardian.AuthGuardianScheduler`` pass which writes the
+rotated tokens back to the database ahead of the model-discovery tick.
 
 **Acceptance:** the scheduler's `registry.update(...)` call receives
 entries under `claude_subscription` after a successful Claude fetch; the
-existing Codex fetch path is byte-for-byte unchanged.
+existing Codex fetch path is byte-for-byte unchanged; the Codex auth
+manager is never instantiated against a Claude row.
 
 ## 4. Tests
 
@@ -98,32 +114,55 @@ existing Codex fetch path is byte-for-byte unchanged.
     Codex path called once, Claude path called once.
   - `test_refresh_filters_claude_accounts_from_codex_fetch`: mirror of
     above.
-- `tests/unit/test_model_fetcher.py` (new) — cover
-  `fetch_claude_models`:
+  - `test_account_access_token_picks_claude_column_for_claude_rows`:
+    direct unit test for the new ``_account_access_token`` resolver;
+    the original ticket's blocker-A — a regression that decrypts
+    ``account.access_token_encrypted`` for a Claude row would surface
+    as ``encryptor.decrypt("claude")`` here.
+  - `test_fetch_with_failover_uses_claude_auth_manager_for_claude_accounts`:
+    pins the provider-scoped auth-manager wiring against the Codex
+    constructor (blocker-B regression).
+- `tests/unit/test_model_fetcher.py` (existing) — already covers
+  `fetch_claude_models` from the previous round; the existing tests are
+  updated for the new kwarg-only signature:
   - Happy path: Anthropic-style body → `UpstreamModel` list.
   - 401 → `ModelFetchError(401, ...)`.
   - 5xx → `ModelFetchError(502, ...)`.
   - Transport error → `ModelFetchError(..., transport_error=True)`.
 
 **Acceptance:** all new tests pass; existing scheduler tests
-(`tests/unit/test_model_refresh_scheduler.py`) still pass byte-for-byte
-(no signature change beyond `fetcher=` kwarg on `_fetch_with_failover`,
-which has a default).
+(`tests/unit/test_model_refresh_scheduler.py`) still pass with the
+**Codex path byte-identical** — the only behavior changes are
+(a) ``_claude_account``/``_account`` fixtures encrypt their token columns
+with the real ``TokenEncryptor`` so the resolver test is meaningful,
+and (b) ``_invoke_fetcher`` plumbs a ``fetcher_takes_account_id`` kwarg.
 
 ## 5. Spec delta
 
 **File:** `openspec/changes/fix-model-refresh-scheduler-provider-scope/specs/model-registry/spec.md`
 
-Add one `ADDED Requirement`:
+Add the following ``ADDED Requirements``:
 
-> **Model registry refresh — provider scope**
-> The model refresh scheduler MUST iterate accounts partitioned by
-> ``provider``. Codex-provider accounts are refreshed via the existing
-> Codex upstream ``/codex/models`` endpoint; Claude-provider accounts
-> are refreshed via the Anthropic ``{claude_api_base_url}/v1/models``
-> endpoint. A bearer token issued for one provider MUST NOT be sent to the
-> other's upstream; doing so is treated as a transient or permanent
-> failure (mirroring existing handling).
+- **Model registry refresh — provider scope** (already shipped): the
+  scheduler MUST iterate accounts partitioned by ``provider`` and route
+  each partition to its provider-specific model catalog endpoint.
+- **`fetch_claude_models` function signature**: drop the unused
+  ``account_id`` positional arg; the function signature is now
+  ``(access_token, *, route=..., codex_client=...,
+  allow_direct_egress=...)``.
+- **Provider-scoped bearer resolution**: a new
+  ``_account_access_token`` resolver MUST decrypt
+  ``Account.claude_access_token_encrypted`` for Claude rows and
+  ``Account.access_token_encrypted`` for Codex rows.
+- **Provider-scoped auth-manager selection**: ``_fetch_with_failover``
+  MUST accept an ``auth_manager_factory``; the Codex branch wires the
+  existing ``AuthManager`` factory, the Claude branch wires
+  ``_ClaudeAuthManagerAdapter``. Constructing ``AuthManager`` against a
+  Claude row is disallowed.
+- **Provider-scoped fetcher dispatch**: ``_invoke_fetcher`` MUST call
+  each fetcher with the right positional shape per provider — Codex
+  receives ``(access_token, chatgpt_account_id)``, Claude receives
+  ``(access_token,)``.
 
 **Acceptance:** `openspec validate --strict` clean.
 

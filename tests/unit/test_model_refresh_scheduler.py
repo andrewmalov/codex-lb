@@ -4,6 +4,7 @@ import contextlib
 import logging
 from datetime import datetime
 from types import SimpleNamespace
+from typing import Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
@@ -12,6 +13,7 @@ import pytest
 import app.core.auth.refresh as refresh_module
 import app.core.clients.model_fetcher as model_fetcher_module
 import app.core.openai.model_refresh_scheduler as scheduler_module
+from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import ReasoningLevel, UpstreamModel
 from app.core.upstream_proxy import ResolvedProxyEndpoint, ResolvedUpstreamRoute
 from app.db.models import Account, AccountStatus
@@ -20,14 +22,15 @@ pytestmark = pytest.mark.unit
 
 
 def _account(account_id: str = "account-1") -> Account:
+    encryptor = TokenEncryptor()
     return Account(
         id=account_id,
         email=f"{account_id}@example.test",
         plan_type="team",
         chatgpt_account_id=f"chatgpt-{account_id}",
-        access_token_encrypted=b"encrypted-access-token",
-        refresh_token_encrypted=b"encrypted-refresh-token",
-        id_token_encrypted=b"encrypted-id-token",
+        access_token_encrypted=encryptor.encrypt("sk-ant-oat01-AT"),
+        refresh_token_encrypted=encryptor.encrypt("sk-ant-refresh-token"),
+        id_token_encrypted=encryptor.encrypt("id-token"),
         last_refresh=datetime(2026, 1, 1),
         status=AccountStatus.ACTIVE,
     )
@@ -358,6 +361,21 @@ async def test_fetch_with_failover_does_not_warn_after_successful_auth_retry(
 
 
 def _claude_account(account_id: str = "claude-account-1") -> Account:
+    """Build a Claude OAuth account row that mirrors the production layout.
+
+    ``access_token_encrypted`` carries the real ``encrypt("claude")``
+    placeholder ciphertext the production code-path writes into the
+    NOT-NULL Codex-flavored column
+    (``app.modules.claude.auth_manager.add_claude_account``,
+    line ~279). ``claude_access_token_encrypted`` carries the real bearer
+    ciphertext — every Claude row's actual access token. Tests must
+    keep these two ciphertexts distinct so the
+    :func:`_account_access_token` resolver visibly picks the right
+    column. See
+    ``openspec/changes/fix-model-refresh-scheduler-provider-scope`` and
+    its follow-up for the column layout contract.
+    """
+    encryptor = TokenEncryptor()
     return Account(
         id=account_id,
         email=f"{account_id}@example.test",
@@ -367,10 +385,11 @@ def _claude_account(account_id: str = "claude-account-1") -> Account:
         claude_account_uuid=f"claude-uuid-{account_id}",
         claude_user_email=f"{account_id}@example.test",
         claude_user_organization_uuid=None,
-        access_token_encrypted=b"encrypted-claude-access-token",
-        refresh_token_encrypted=b"encrypted-claude-refresh-token",
-        claude_access_token_encrypted=b"encrypted-claude-access-token",
-        claude_refresh_token_encrypted=b"encrypted-claude-refresh-token",
+        access_token_encrypted=encryptor.encrypt("claude"),
+        refresh_token_encrypted=encryptor.encrypt("claude"),
+        id_token_encrypted=encryptor.encrypt("claude"),
+        claude_access_token_encrypted=encryptor.encrypt("sk-ant-real-bearer"),
+        claude_refresh_token_encrypted=encryptor.encrypt("sk-ant-real-refresh"),
         last_refresh=datetime(2026, 1, 1),
         status=AccountStatus.ACTIVE,
     )
@@ -380,18 +399,30 @@ async def test_fetch_with_failover_uses_injected_fetcher(monkeypatch: pytest.Mon
     """The fetcher kwarg on `_fetch_with_failover` MUST be honored —
     this is the hook that routes Claude accounts to
     ``fetch_claude_models`` and away from the Codex upstream.
+
+    The encryptor is the real :class:`TokenEncryptor` (not a mock) so
+    the test catches the provider-scoped bearer-source bug too: the
+    Claude account's ``claude_access_token_encrypted`` ("sk-ant-real-bearer")
+    MUST be the value handed to ``fetch_claude_models`` — NOT the
+    Codex-flavored ``encrypt("claude")`` placeholder in
+    ``access_token_encrypted``. The two columns are encrypted with
+    distinct material via :func:`_claude_account`; a regression that
+    decrypts the wrong column would surface here as ``sk-ant-real-bearer``
+    never reaching the fetcher and the test failing on the
+    ``access_token`` assertion below.
     """
     claude_account = _claude_account("claude-1")
     claude_models = [_model("claude-opus-4-20250514")]
 
-    codex_fetcher = AsyncMock(side_effect=AssertionError("Codex fetcher MUST NOT be called for Claude accounts"))
+    codex_fetcher = AsyncMock(
+        side_effect=AssertionError("Codex fetcher MUST NOT be called for Claude accounts")
+    )
     claude_fetcher = AsyncMock(return_value=claude_models)
 
     monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
     monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_fetcher)
 
-    encryptor = MagicMock()
-    encryptor.decrypt.return_value = "sk-ant-oat01-AT"
+    encryptor = TokenEncryptor()
 
     result = await scheduler_module._fetch_with_failover(
         [claude_account],
@@ -405,6 +436,73 @@ async def test_fetch_with_failover_uses_injected_fetcher(monkeypatch: pytest.Mon
     assert result.account_models == {claude_account.id: ("claude_subscription", claude_models)}
     claude_fetcher.assert_awaited_once()
     codex_fetcher.assert_not_called()
+    # The Claude fetcher MUST receive the real Claude bearer
+    # (``sk-ant-real-bearer``); a bug that decrypts the Codex-flavored
+    # placeholder column would surface as ``"claude"`` here.
+    claude_args, _ = claude_fetcher.await_args
+    assert claude_args == ("sk-ant-real-bearer",)
+
+
+async def test_fetch_with_failover_uses_claude_auth_manager_for_claude_accounts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for Blocker B: the Claude branch of ``_fetch_with_failover``
+    MUST instantiate a Claude-scoped auth manager — NOT the Codex one.
+    Invoking :class:`AuthManager` on a Claude account would attempt to
+    read ``refresh_token_encrypted`` (the placeholder column) and either
+    silently swallow or surface a nonsensical refresh error.
+
+    The model's "Claude auth manager" here is a thin Protocol-conforming
+    adapter (``_ClaudeAuthManagerAdapter``) that defers rotation to the
+    dedicated auth guardian pass — see the adapter's docstring. This
+    test pins the wiring only: the failover loop must route Claude
+    accounts through the Claude adapter factory.
+    """
+    claude_account = _claude_account("claude-1")
+    claude_models = [_model("claude-opus-4-20250514")]
+    claude_fetcher = AsyncMock(return_value=claude_models)
+
+    codex_constructor = MagicMock(
+        side_effect=AssertionError(
+            "Codex AuthManager MUST NOT be constructed for Claude accounts"
+        )
+    )
+    monkeypatch.setattr(scheduler_module, "AuthManager", codex_constructor)
+    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_constructor)
+
+    fake_repo = MagicMock()
+    fake_repo.session = MagicMock(refresh=AsyncMock())
+
+    claude_factory = scheduler_module._build_claude_auth_manager_factory(TokenEncryptor())
+    result = await scheduler_module._fetch_with_failover(
+        [claude_account],
+        TokenEncryptor(),
+        cast(Any, fake_repo),
+        fetcher=claude_fetcher,
+        auth_manager_factory=claude_factory,
+    )
+
+    assert result is not None
+    codex_constructor.assert_not_called()
+    claude_fetcher.assert_awaited_once()
+
+
+def test_account_access_token_picks_claude_column_for_claude_rows() -> None:
+    """Regression for Blocker A: the bearer sent to ``fetch_claude_models``
+    MUST be ``encryptor.decrypt(account.claude_access_token_encrypted)``,
+    never the Codex-flavored ``account.access_token_encrypted`` (which is
+    the ``encrypt("claude")`` placeholder in production).
+    """
+    claude_account = _claude_account("claude-1")
+    encryptor = TokenEncryptor()
+
+    bearer = scheduler_module._account_access_token(encryptor, claude_account)
+
+    assert bearer == "sk-ant-real-bearer"
+    # Decrypting the Codex-flavored column directly MUST surface the
+    # literal placeholder — this proves the resolver picked the right
+    # column above.
+    assert encryptor.decrypt(claude_account.access_token_encrypted) == "claude"
 
 
 async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
@@ -422,48 +520,9 @@ async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
     codex_fetcher = AsyncMock(return_value=[_model("gpt-5.4")])
     claude_fetcher = AsyncMock(return_value=[_model("claude-opus-4-20250514")])
 
-    accounts_repo = MagicMock()
-    accounts_repo.list_accounts_by_provider = AsyncMock(
-        side_effect=lambda provider: {
-            "codex": [codex_account],
-            "claude": [claude_account],
-        }[provider]
-    )
-
     registry = MagicMock()
     registry.update = AsyncMock()
 
-    monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
-    monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_fetcher)
-    monkeypatch.setattr(scheduler_module, "fetch_claude_models", claude_fetcher)
-    monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: registry)
-
-    @contextlib.asynccontextmanager
-    async def session_ctx():
-        # The scheduler does ``AccountsRepository(session)`` which calls
-        # ``session.execute(stmt)``. Provide a session whose ``execute``
-        # is an AsyncMock so the real ``list_accounts_by_provider`` works.
-        session = MagicMock()
-
-        async def _execute(_stmt: object) -> MagicMock:
-            result = MagicMock()
-            provider_accounts = {
-                "codex": [codex_account],
-                "claude": [claude_account],
-            }
-            # The repository's list_accounts_by_provider looks at
-            # ``Account.provider == provider``; we short-circuit by
-            # returning scalars_for_provider via the stmt argument.
-            # Easier: bypass the real repo and let the test inject via
-            # monkeypatch on the repo's method (already set below).
-            result.scalars = MagicMock(return_value=MagicMock(all=MagicMock(return_value=[])))
-            return result
-
-        session.execute = AsyncMock(side_effect=_execute)
-        yield session
-
-    # Patch the repository method that the scheduler calls so we don't
-    # have to drive a real SQLAlchemy session through execute().
     def _list_by_provider(provider: str) -> list[Account]:
         if provider == "codex":
             return [codex_account]
@@ -471,21 +530,14 @@ async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
             return [claude_account]
         return []
 
-    @contextlib.asynccontextmanager
-    async def repo_ctx() -> object:
-        yield MagicMock(list_accounts_by_provider=AsyncMock(side_effect=_list_by_provider))
-
-    # The scheduler does ``async with get_background_session() as session:
-    # accounts_repo = AccountsRepository(session)``. We need both to
-    # play nice. Provide a session whose ``execute`` returns an empty
-    # scalars (we won't reach it because we monkeypatch the repo method
-    # after the scheduler constructs the AccountsRepository instance).
-
-    # Easier approach: monkeypatch the AccountsRepository class so its
-    # constructor returns our preconfigured repo.
     class _FakeRepo:
         def __init__(self, _session: object) -> None:
             self.list_accounts_by_provider = AsyncMock(side_effect=_list_by_provider)
+            # ``_refresh_once`` does ``session.refresh(account)`` after
+            # every Claude rotation pass; the refresher may decide a
+            # Claude account is not yet due and skip the call entirely,
+            # so this is best-effort — both branches are exercised.
+            self.session = MagicMock(refresh=AsyncMock())
 
     monkeypatch.setattr(scheduler_module, "AccountsRepository", _FakeRepo)
     monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
@@ -494,11 +546,11 @@ async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
     monkeypatch.setattr(scheduler_module, "get_model_registry", lambda: registry)
 
     @contextlib.asynccontextmanager
-    async def session_ctx2():
+    async def session_ctx():
         yield MagicMock()
 
-    monkeypatch.setattr(scheduler_module, "get_background_session", session_ctx2)
-    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: MagicMock(decrypt=lambda b: "decrypted"))
+    monkeypatch.setattr(scheduler_module, "get_background_session", session_ctx)
+    monkeypatch.setattr(scheduler_module, "TokenEncryptor", TokenEncryptor)
     monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _AlwaysLeader())
     monkeypatch.setattr(scheduler_module, "_resolve_upstream_route_for_account", AsyncMock(return_value=None))
 
@@ -508,8 +560,19 @@ async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
     codex_fetcher.assert_awaited_once()
     claude_fetcher.assert_awaited_once()
     # Each fetcher was called with its own account only.
-    assert codex_fetcher.await_args.args[1] == codex_account.chatgpt_account_id
-    assert claude_fetcher.await_args.args[1] is None  # claude fetcher ignores account_id
+    codex_call_args, codex_call_kwargs = codex_fetcher.await_args
+    assert codex_call_args == ("sk-ant-oat01-AT", codex_account.chatgpt_account_id)
+    # The Codex dispatcher passes ``allow_direct_egress=True`` when no
+    # upstream route resolves (the test fixture returns ``None``).
+    assert codex_call_kwargs.get("allow_direct_egress") is True
+    # The Claude fetcher receives ONLY a positional ``access_token``;
+    # ``account_id`` was dropped from ``fetch_claude_models`` because
+    # Anthropic rejects ``chatgpt-account-id`` headers outright.
+    claude_call_args, _claude_call_kwargs = claude_fetcher.await_args
+    assert claude_call_args == ("sk-ant-real-bearer",)
+    # Codex fetcher MUST NOT have seen the Claude bearer.
+    assert "sk-ant-real-bearer" not in codex_call_args
+    assert "sk-ant-oat01-AT" not in claude_call_args
 
     registry.update.assert_awaited_once()
     call = registry.update.await_args
@@ -530,31 +593,22 @@ async def test_refresh_once_skips_provider_with_no_accounts(monkeypatch: pytest.
     """If a provider has no accounts, its fetcher MUST NOT be called —
     no surprise network traffic for empty partitions.
     """
-    codex_fetcher = AsyncMock(side_effect=AssertionError("Codex fetcher MUST NOT be called when there are no accounts"))
-    claude_fetcher = AsyncMock(side_effect=AssertionError("Claude fetcher MUST NOT be called when there are no accounts"))
+    codex_fetcher = AsyncMock(
+        side_effect=AssertionError("Codex fetcher MUST NOT be called when there are no accounts")
+    )
+    claude_fetcher = AsyncMock(
+        side_effect=AssertionError("Claude fetcher MUST NOT be called when there are no accounts")
+    )
 
     class _FakeRepoEmpty:
         def __init__(self, _session: object) -> None:
             self.list_accounts_by_provider = AsyncMock(return_value=[])
+            self.session = MagicMock(refresh=AsyncMock())
 
     monkeypatch.setattr(scheduler_module, "AccountsRepository", _FakeRepoEmpty)
     monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
     monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_fetcher)
     monkeypatch.setattr(scheduler_module, "fetch_claude_models", claude_fetcher)
-
-    @contextlib.asynccontextmanager
-    async def session_ctx():
-        yield MagicMock()
-
-    monkeypatch.setattr(scheduler_module, "get_background_session", session_ctx)
-    monkeypatch.setattr(scheduler_module, "TokenEncryptor", lambda: MagicMock())
-    monkeypatch.setattr(scheduler_module, "_get_leader_election", lambda: _AlwaysLeader())
-
-    scheduler = scheduler_module.ModelRefreshScheduler(interval_seconds=3600, enabled=True)
-    await scheduler._refresh_once()
-
-    codex_fetcher.assert_not_called()
-    claude_fetcher.assert_not_called()
 
     @contextlib.asynccontextmanager
     async def session_ctx():

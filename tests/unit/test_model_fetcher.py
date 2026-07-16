@@ -184,7 +184,7 @@ async def test_fetch_claude_models_happy_path(monkeypatch: pytest.MonkeyPatch) -
 
     monkeypatch.setattr("app.core.clients.model_fetcher.lease_http_session", lease_session)
 
-    models = await fetch_claude_models("sk-ant-oat01-AT", None, allow_direct_egress=True)
+    models = await fetch_claude_models("sk-ant-oat01-AT", allow_direct_egress=True)
 
     assert [m.slug for m in models] == [
         "claude-opus-4-20250514",
@@ -215,7 +215,7 @@ async def test_fetch_claude_models_401_raises_model_fetch_error(monkeypatch: pyt
     monkeypatch.setattr("app.core.clients.model_fetcher.lease_http_session", lease_session)
 
     with pytest.raises(ModelFetchError) as exc_info:
-        await fetch_claude_models("sk-ant-bad-token", None, allow_direct_egress=True)
+        await fetch_claude_models("sk-ant-bad-token", allow_direct_egress=True)
 
     assert exc_info.value.status_code == 401
     assert "Could not parse" in exc_info.value.message
@@ -235,7 +235,7 @@ async def test_fetch_claude_models_timeout_raises_transport_error(monkeypatch: p
     monkeypatch.setattr("app.core.clients.model_fetcher.lease_http_session", lease_session)
 
     with pytest.raises(ModelFetchError) as exc_info:
-        await fetch_claude_models("sk-ant-oat01-AT", None, allow_direct_egress=True)
+        await fetch_claude_models("sk-ant-oat01-AT", allow_direct_egress=True)
 
     assert exc_info.value.status_code == 504
     assert "timed out" in exc_info.value.message
@@ -258,7 +258,7 @@ async def test_fetch_claude_models_strips_trailing_slash_from_base(monkeypatch: 
 
     monkeypatch.setattr("app.core.clients.model_fetcher.lease_http_session", lease_session)
 
-    await fetch_claude_models("sk-ant-oat01-AT", None, allow_direct_egress=True)
+    await fetch_claude_models("sk-ant-oat01-AT", allow_direct_egress=True)
 
     assert session.last_url == "https://api.anthropic.com/v1/models"
     assert "//v1" not in (session.last_url or "")

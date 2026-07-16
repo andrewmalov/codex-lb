@@ -71,8 +71,39 @@ test surface, different OpenSpec capability (`model-registry` vs
 ## Non-claim about Codex behavior
 
 The Codex fetcher path itself is unchanged by this change. We do not
-redesign Codex auth or scheduling — only add provider filtering and a
-Claude fetcher so the Claude rows don't get caught in the wrong path.
+redesign Codex auth or scheduling — only add provider filtering, a
+Claude fetcher, and provider-scoped bearer/auth-manager resolution so
+the Claude rows don't get caught in the wrong path.
+
+## Follow-up: provider-scoped bearer and auth-manager fixes
+
+The original PR (#29) of this change added provider scoping of the
+*upstream endpoint* (where to fetch models) but missed two follow-on
+holes that surface only against Claude rows. Both are caught by
+regression tests and were fixed in this branch:
+
+1. **Bearer source.** `_fetch_models_with_transport_recovery` originally
+   decrypted `account.access_token_encrypted` for every account. For
+   Claude rows that column holds `encrypt("claude")` (the literal
+   placeholder the table's `NOT NULL` constraint forces — see
+   `app/modules/claude/auth_manager.py:add_claude_account` line ~279);
+   the real Claude bearer lives in `claude_access_token_encrypted`. A
+   new `_account_access_token` resolver picks the right column per
+   `Account.provider`.
+2. **Auth manager.** `_fetch_with_failover` originally constructed the
+   Codex `AuthManager` for every row. For Claude rows that manager
+   reads `refresh_token_encrypted` (the same placeholder column) and
+   either silently swallows or surfaces a nonsensical refresh failure.
+   The new `auth_manager_factory` kwarg wires a thin Protocol shim
+   (`_ClaudeAuthManagerAdapter`) for the Claude branch. Rotation is
+   still owned by the auth guardian — the adapter's job is to keep
+   the failover loop from invoking Codex code paths against Claude
+   rows.
+
+If only one of these is fixed the incident reproduces: with the wrong
+bearer the Codex upstream still returns 401; with the wrong auth
+manager a placeholder refresh token is decrypted and silently
+swallowed.
 
 ## Related
 

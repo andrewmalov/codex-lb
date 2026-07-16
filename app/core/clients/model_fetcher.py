@@ -192,7 +192,6 @@ async def fetch_models_for_plan(
 
 async def fetch_claude_models(
     access_token: str,
-    account_id: str | None,
     *,
     route: ResolvedUpstreamRoute | None = None,
     codex_client: CodexClient | None = None,
@@ -208,6 +207,11 @@ async def fetch_claude_models(
     "Could not parse your authentication token" failure that flipped
     every Claude account to ``reauth_required`` within ~60 seconds of
     being added (2026-07-15 incident on ``claude-test.bezproblem.vip``).
+
+    Unlike :func:`fetch_models_for_plan`, this function does NOT accept
+    an ``account_id`` parameter: the Claude OAuth pool has no
+    Codex-style ``chatgpt_account_id`` to forward, and Anthropic does
+    not recognize the ``chatgpt-account-id`` header.
 
     See ``openspec/changes/fix-model-refresh-scheduler-provider-scope``
     for the full contract.
@@ -228,7 +232,6 @@ async def fetch_claude_models(
         "anthropic-version": "2023-06-01",
         "Accept": "application/json",
     }
-    del account_id  # not used; kept in signature for symmetry with fetch_models_for_plan
 
     try:
         if route is not None:

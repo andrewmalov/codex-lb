@@ -42,8 +42,8 @@ accounts are excluded from the Codex fetch.
 
 ### 2. New `fetch_claude_models` against Anthropic's model catalog
 
-A new function `fetch_claude_models(access_token, account_id, *,
-route=None, codex_client=None, allow_direct_egress=False)` in
+A new function `fetch_claude_models(access_token, *, route=None,
+codex_client=None, allow_direct_egress=False)` in
 `app.core.clients.model_fetcher` calls
 `GET {claude_api_base_url}/v1/models` with `Authorization: Bearer ...` and
 no `chatgpt-account-id` header (Anthropic doesn't accept it). The
@@ -51,13 +51,56 @@ response shape (`{"data": [{"id": "...", "display_name": "...", ...}]}`)
 parses to `list[UpstreamModel]` and is grouped under plan
 `claude_subscription`.
 
+The signature drops the unused `account_id` parameter from the
+original PR — the Claude OAuth pool has no Codex-style
+`chatgpt_account_id` to forward, and the dispatcher surfaces this
+asymmetry via a `fetcher_takes_account_id` kwarg on
+`_invoke_fetcher` so the Claude branch receives only the access token
+positionally.
+
 ### 3. Scheduler wires Claude fetcher in
 
 After the Codex fetch, the scheduler iterates Claude accounts (also via
-`list_accounts()` filtered to `provider='claude'`) and runs the same
-failover loop with `fetch_claude_models`. Failure handling mirrors the
-existing Codex path: 401 → refresh-token rotation retry → `token_expired`
-permanent marks the account `reauth_required`.
+`list_accounts_by_provider('claude')`) and runs the same failover loop
+with `fetch_claude_models`. Failure handling mirrors the existing Codex
+path: 401 → refresh-token rotation retry → `token_expired` permanent
+marks the account `reauth_required`.
+
+### 4. Provider-scoped bearer resolution
+
+A new helper `_account_access_token(encryptor, account)` decrypts the
+correct encrypted column per provider:
+
+- `Account.provider == 'claude'` → decrypt
+  `account.claude_access_token_encrypted` (the real Claude bearer).
+- `Account.provider == 'codex'` → decrypt `account.access_token_encrypted`
+  (the Codex bearer).
+
+This fixes the silent regression where the scheduler unconditionally
+read `account.access_token_encrypted` for every account — for Claude
+accounts that column holds `encrypt("claude")` (the placeholder the
+NOT-NULL constraint forced) and decrypts to the literal string
+`"claude"`. The Codex upstream's response to `Bearer claude` was a
+permanent 401; the scheduler then marked the account `reauth_required`
+inside one tick.
+
+### 5. Provider-scoped auth-manager selection
+
+The existing `AuthManager(accounts_repo)` constructor returns the Codex
+auth manager whose `refresh_account` reads `refresh_token_encrypted`
+(the same placeholder column for Claude rows). `_fetch_with_failover`
+now accepts an `auth_manager_factory: Callable[[AccountsRepository],
+_AuthManagerLike] | None` kwarg; the default wires `AuthManager(repo)`
+for the Codex branch, and `_refresh_once` passes a
+`_ClaudeAuthManagerAdapter` factory for the Claude branch.
+
+The Claude adapter is a thin Protocol shim satisfying
+`ensure_fresh(account, *, force=False) -> Account`. It is a no-op for
+the rotation pass because Claude OAuth rotation is owned by the
+dedicated `app.core.auth.guardian.AuthGuardianScheduler` pass which
+writes the rotated tokens back to the database ahead of the
+model-discovery tick. The adapter's only job is to keep the failover
+loop from instantiating the Codex auth manager against Claude rows.
 
 ### Non-goals
 
@@ -68,6 +111,9 @@ permanent marks the account `reauth_required`.
 - **No retry-budget rework**. The Claude fetcher reuses the same
   `RefreshError` path the existing Codex path uses; nothing new in the
   refresh scheduler's lock/state machine.
+- **No column-layout change**. The placeholder semantics in
+  `app/modules/claude/auth_manager.py` stay; the fix is purely a
+  resolver that picks the right column.
 
 ## Success criteria
 
@@ -76,7 +122,10 @@ permanent marks the account `reauth_required`.
   scheduler interval.
 - `registry.get_snapshot()` lists Claude models under plan
   `claude_subscription` after a successful refresh.
-- Existing Codex model refresh behavior is unchanged.
+- Existing Codex model refresh behavior is unchanged
+  (byte-identical `AuthManager(repo)` path for Codex rows).
 - The fix is covered by tests: scheduler filters by provider, Claude
-  fetcher hits the right endpoint, failure modes match existing Codex
+  fetcher hits the right endpoint, the bearer resolver picks the right
+  column per account, the auth-manager factory routes Claude rows
+  through the Claude adapter, and failure modes match existing Codex
   handling.
