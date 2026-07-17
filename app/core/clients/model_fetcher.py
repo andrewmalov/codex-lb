@@ -190,6 +190,139 @@ async def fetch_models_for_plan(
     return result
 
 
+async def fetch_claude_models(
+    access_token: str,
+    *,
+    route: ResolvedUpstreamRoute | None = None,
+    codex_client: CodexClient | None = None,
+    allow_direct_egress: bool = False,
+) -> list[UpstreamModel]:
+    """Fetch the Anthropic ``/v1/models`` catalog using a Claude OAuth
+    access token.
+
+    Mirrors :func:`fetch_models_for_plan` so the same
+    ``_fetch_with_failover`` loop can be parameterized by fetcher. The
+    ``chatgpt-account-id`` header is intentionally NOT sent — Anthropic
+    rejects unknown headers, which produced the 401
+    "Could not parse your authentication token" failure that flipped
+    every Claude account to ``reauth_required`` within ~60 seconds of
+    being added (2026-07-15 incident on ``claude-test.bezproblem.vip``).
+
+    Unlike :func:`fetch_models_for_plan`, this function does NOT accept
+    an ``account_id`` parameter: the Claude OAuth pool has no
+    Codex-style ``chatgpt_account_id`` to forward, and Anthropic does
+    not recognize the ``chatgpt-account-id`` header.
+
+    See ``openspec/changes/fix-model-refresh-scheduler-provider-scope``
+    for the full contract.
+    """
+    settings = get_settings()
+    claude_base = settings.claude_api_base_url.rstrip("/")
+    url = f"{claude_base}/v1/models"
+    require_route_or_direct_egress_opt_in(
+        route=route,
+        allow_direct_egress=allow_direct_egress,
+        operation="claude model discovery",
+    )
+
+    # Anthropic requires ``anthropic-version``; the ``chatgpt-account-id``
+    # header used for the Codex upstream is intentionally NOT sent.
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {access_token}",
+        "anthropic-version": "2023-06-01",
+        "Accept": "application/json",
+    }
+
+    try:
+        if route is not None:
+            owns_codex_client = codex_client is None
+            active_codex_client = codex_client or CodexClient(create_codex_session())
+            try:
+                resp = await active_codex_client.request(
+                    "GET",
+                    url,
+                    route=route,
+                    headers=headers,
+                    timeout=_FETCH_TIMEOUT_SECONDS,
+                )
+            finally:
+                if owns_codex_client:
+                    close = getattr(active_codex_client, "close", None)
+                    if callable(close):
+                        await close()
+            status = _codex_response_status(resp)
+            if status >= 400:
+                text = await _codex_response_text(resp)
+                raise ModelFetchError(status, f"HTTP {status}: {text[:200]}")
+            data = await _codex_response_json(resp)
+        else:
+            timeout = aiohttp.ClientTimeout(total=_FETCH_TIMEOUT_SECONDS)
+            async with lease_http_session() as session:
+                async with session.get(url, headers=headers, timeout=timeout) as resp:
+                    if resp.status >= 400:
+                        text = await resp.text()
+                        raise ModelFetchError(resp.status, f"HTTP {resp.status}: {text[:200]}")
+
+                    data = await resp.json(content_type=None)
+    except ModelFetchError:
+        raise
+    except asyncio.TimeoutError as exc:
+        raise ModelFetchError(504, "Anthropic models API timed out", transport_error=True) from exc
+    except (aiohttp.ClientError, OSError, CodexTransportError) as exc:
+        message = str(exc) or exc.__class__.__name__
+        raise ModelFetchError(
+            0, f"Transport error during Anthropic model fetch: {message}", transport_error=True
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise ModelFetchError(502, "Invalid response format from Anthropic models API")
+
+    data_object = cast(dict[str, object], data)
+    models_raw = data_object.get("data")
+    if not isinstance(models_raw, list):
+        raise ModelFetchError(502, "Missing 'data' key in Anthropic models response")
+
+    result: list[UpstreamModel] = []
+    for entry in models_raw:
+        if not isinstance(entry, dict):
+            continue
+        entry_data = cast(dict[str, JsonValue], entry)
+        model_id = entry_data.get("id")
+        if not isinstance(model_id, str) or not model_id:
+            continue
+        display_name = entry_data.get("display_name")
+        if not isinstance(display_name, str) or not display_name:
+            display_name = model_id
+        # Anthropic's /v1/models response is intentionally minimal
+        # (id, display_name, type). We populate defaults that map cleanly
+        # into the UpstreamModel dataclass; downstream callers see
+        # ``claude_<model_id>`` as the slug with the canonical display name.
+        result.append(
+            UpstreamModel(
+                slug=model_id,
+                display_name=display_name,
+                description="",
+                base_instructions="",
+                context_window=0,
+                input_modalities=(),
+                supported_reasoning_levels=(),
+                default_reasoning_level=None,
+                supports_reasoning_summaries=False,
+                support_verbosity=False,
+                default_verbosity=None,
+                prefer_websockets=False,
+                supports_parallel_tool_calls=False,
+                supported_in_api=True,
+                minimal_client_version=None,
+                priority=0,
+                available_in_plans=frozenset({"claude_subscription"}),
+                raw={k: v for k, v in entry_data.items() if k not in _FILTERED_FIELDS},
+            )
+        )
+
+    return result
+
+
 def _codex_response_status(response: object) -> int:
     value = getattr(response, "status_code", getattr(response, "status", None))
     if value is None:

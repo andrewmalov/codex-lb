@@ -68,6 +68,18 @@ class AccountsRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_accounts_by_provider(self, provider: str) -> list[Account]:
+        """Return accounts scoped to a single provider.
+
+        Used by the model refresh scheduler so a Claude OAuth bearer
+        token is never sent to the Codex upstream
+        (``{upstream_base_url}/codex/models``) and vice-versa. See
+        ``openspec/changes/fix-model-refresh-scheduler-provider-scope``.
+        """
+        stmt = select(Account).where(Account.provider == provider).order_by(Account.email)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def list_request_usage_summary_by_account(
         self,
         account_ids: list[str] | None = None,

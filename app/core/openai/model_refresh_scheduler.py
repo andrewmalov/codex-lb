@@ -5,11 +5,15 @@ import contextlib
 import importlib
 import logging
 from dataclasses import dataclass, field
-from typing import Protocol, cast
+from typing import Awaitable, Callable, Protocol, cast
 
 from app.core.auth.refresh import RefreshError
 from app.core.clients.http import refresh_http_client
-from app.core.clients.model_fetcher import ModelFetchError, fetch_models_for_plan
+from app.core.clients.model_fetcher import (
+    ModelFetchError,
+    fetch_claude_models,
+    fetch_models_for_plan,
+)
 from app.core.config.settings import get_settings
 from app.core.crypto import TokenEncryptor
 from app.core.openai.model_registry import (
@@ -31,6 +35,23 @@ class _LeaderElectionLike(Protocol):
     async def try_acquire(self) -> bool: ...
 
 
+class _AuthManagerLike(Protocol):
+    """Subset of an auth manager that the model refresh scheduler needs.
+
+    Both :class:`app.modules.accounts.auth_manager.AuthManager` (Codex)
+    and the Claude-side adapter (see :class:`_ClaudeAuthManagerAdapter`)
+    satisfy this contract: a single ``ensure_fresh`` call that returns a
+    refreshed :class:`Account`. Keeping this as a Protocol avoids forcing
+    the two concrete classes into a shared inheritance tree they don't
+    need to be in.
+    """
+
+    async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account: ...
+
+
+_AuthManagerFactory = Callable[[AccountsRepository], _AuthManagerLike]
+
+
 @dataclass(slots=True)
 class _TransportRecoveryState:
     attempted: bool = False
@@ -45,6 +66,87 @@ class _FetchResult:
 def _get_leader_election() -> _LeaderElectionLike:
     module = importlib.import_module("app.core.scheduling.leader_election")
     return cast(_LeaderElectionLike, module.get_leader_election())
+
+
+def _account_access_token(encryptor: TokenEncryptor, account: Account) -> str:
+    """Decrypt and return the access token for ``account``, picking the
+    provider-scoped column.
+
+    Claude accounts store the real bearer in
+    ``account.claude_access_token_encrypted`` and use the
+    NOT-NULL-constrained ``access_token_encrypted`` column as a
+    placeholder (``encrypt("claude")``). Reading the Codex column for a
+    Claude row decrypts to the literal string ``"claude"`` — sending
+    that to any upstream is wrong. For Codex rows the standard column is
+    used. See
+    ``openspec/changes/fix-model-refresh-scheduler-provider-scope`` and
+    its follow-up for the column layout contract.
+    """
+    if getattr(account, "provider", None) == "claude":
+        ciphertext = account.claude_access_token_encrypted
+        if ciphertext is None:
+            return ""
+        return encryptor.decrypt(ciphertext)
+    return encryptor.decrypt(account.access_token_encrypted)
+
+
+def _default_auth_manager_factory(repo: AccountsRepository) -> _AuthManagerLike:
+    return AuthManager(repo)
+
+
+class _ClaudeAuthManagerAdapter:
+    """Adapter that exposes :class:`_AuthManagerLike`-shape ``ensure_fresh``
+    for Claude OAuth accounts.
+
+    The Codex auth manager reads ``refresh_token_encrypted`` (a placeholder
+    for Claude rows; the real refresh token lives in
+    ``claude_refresh_token_encrypted``). Invoking the Codex manager for a
+    Claude account would either surface a nonsensical refresh failure or
+    silently swallow the placeholder. This adapter is a thin Protocol
+    shim — Claude OAuth rotation is owned by the dedicated auth guardian
+    pass (``app.core.auth.guardian.AuthGuardianScheduler``), so the model
+    refresh scheduler does NOT take ownership of rotation here.
+
+    Concretely, ``ensure_fresh`` is a no-op in this adapter. Its sole job
+    is to satisfy the scheduler's :class:`_AuthManagerLike` contract so
+    the failover loop does not try to instantiate the Codex
+    :class:`AuthManager` for Claude accounts. If the access token is
+    expired the upstream returns 401, which routes through the scheduler's
+    existing 401-retry path (``force=True``); for that branch this
+    adapter still defers — rotation is delegated to the auth guardian on
+    its next tick. Operators see a model-fetch 401 logged for the account
+    rather than a silent ``reauth_required`` flip from a placeholder
+    refresh-token decrypt — which is the actual bug the change exists
+    to prevent.
+    """
+
+    def __init__(self, _repo: AccountsRepository, *, encryptor: TokenEncryptor) -> None:
+        # ``_repo`` is kept on the surface for symmetry with the Codex
+        # adapter and so tests can introspect the binding, but it is not
+        # used by the no-op implementation.
+        self._repo = _repo
+        self._encryptor = encryptor
+
+    async def ensure_fresh(self, account: Account, *, force: bool = False) -> Account:
+        # Rotation is owned by ``app.core.auth.guardian``. Returning
+        # the row unchanged keeps the model-discovery loop running; the
+        # auth guardian refreshes the credential before its next
+        # Claude-touching pass.
+        return account
+
+
+def _build_claude_auth_manager_factory(encryptor: TokenEncryptor) -> _AuthManagerFactory:
+    """Build a factory yielding :class:`_ClaudeAuthManagerAdapter` instances
+    bound to the scheduler's per-tick ``AccountsRepository``.
+
+    Returning a factory (rather than a singleton adapter) matches the
+    Codex path and keeps session ownership at the scheduler boundary.
+    """
+
+    def _factory(repo: AccountsRepository) -> _AuthManagerLike:
+        return cast(_AuthManagerLike, _ClaudeAuthManagerAdapter(repo, encryptor=encryptor))
+
+    return _factory
 
 
 @dataclass(slots=True)
@@ -86,46 +188,80 @@ class ModelRefreshScheduler:
         try:
             async with get_background_session() as session:
                 accounts_repo = AccountsRepository(session)
-                accounts = await accounts_repo.list_accounts()
-                grouped = _group_by_plan(accounts)
-                if not grouped:
-                    logger.debug("No active accounts for model registry refresh")
-                    return
-
                 encryptor = TokenEncryptor()
                 per_plan_results: dict[str, list[UpstreamModel]] = {}
                 per_account_results: dict[str, tuple[str, list[UpstreamModel]]] = {}
                 active_account_plans: dict[str, str] = {}
 
-                for plan_type, candidates in grouped.items():
-                    for account in candidates:
-                        active_account_plans[account.id] = plan_type
-                    result = await _fetch_with_failover(
-                        candidates,
-                        encryptor,
-                        accounts_repo,
-                    )
-                    if result is not None:
-                        per_plan_results[plan_type] = result.models
-                        per_account_results.update(result.account_models)
+                # Provider-scoped fetch — see
+                # openspec/changes/fix-model-refresh-scheduler-provider-scope
+                # and its follow-up for the bearer/auth-manager scoping.
+                # A Claude OAuth bearer MUST NOT be sent to the Codex
+                # upstream ``/codex/models`` endpoint (Anthropic returns
+                # 401, the scheduler would mark the Claude account
+                # ``reauth_required``). The refresh path for Claude
+                # accounts MUST use ``ClaudeAuthManager`` so it reads
+                # ``claude_refresh_token_encrypted`` (NOT the placeholder
+                # Codex-flavored column).
+                claude_auth_manager_factory = _build_claude_auth_manager_factory(encryptor)
 
-                if per_plan_results:
-                    registry = get_model_registry()
-                    await registry.update(
-                        per_plan_results,
-                        per_account_results=per_account_results,
-                        active_account_plans=active_account_plans,
-                    )
-                    snapshot = registry.get_snapshot()
-                    total_models = len(snapshot.models) if snapshot else 0
-                    logger.info(
-                        "Model registry refreshed plans=%d total_models=%d",
-                        len(per_plan_results),
-                        total_models,
-                    )
-                    get_account_selection_cache().invalidate()
-                else:
-                    logger.warning("Model registry refresh failed for all plans")
+                provider_candidates_count = 0
+                provider_with_results_count = 0
+
+                for provider, fetcher, auth_manager_factory in (
+                    ("codex", fetch_models_for_plan, _default_auth_manager_factory),
+                    ("claude", fetch_claude_models, claude_auth_manager_factory),
+                ):
+                    candidates = await accounts_repo.list_accounts_by_provider(provider)
+                    if not candidates:
+                        continue
+                    provider_candidates_count += 1
+                    grouped = _group_by_plan(candidates)
+                    for plan_type, plan_candidates in grouped.items():
+                        for account in plan_candidates:
+                            active_account_plans[account.id] = plan_type
+                        result = await _fetch_with_failover(
+                            plan_candidates,
+                            encryptor,
+                            accounts_repo,
+                            fetcher=fetcher,
+                            auth_manager_factory=auth_manager_factory,
+                        )
+                        if result is not None:
+                            per_plan_results[plan_type] = result.models
+                            per_account_results.update(result.account_models)
+                            provider_with_results_count += 1
+
+                if not per_plan_results:
+                    if provider_candidates_count == 0:
+                        logger.debug("No active accounts for model registry refresh")
+                    else:
+                        # Distinct warn: candidates existed but every
+                        # provider exhausted retries; surface this so
+                        # operators can correlate against upstream
+                        # incidents instead of misreading a "no
+                        # accounts" quiet day.
+                        logger.warning(
+                            "Model registry refresh produced no results despite candidates "
+                            "providers_with_candidates=%d",
+                            provider_candidates_count,
+                        )
+                    return
+
+                registry = get_model_registry()
+                await registry.update(
+                    per_plan_results,
+                    per_account_results=per_account_results,
+                    active_account_plans=active_account_plans,
+                )
+                snapshot = registry.get_snapshot()
+                total_models = len(snapshot.models) if snapshot else 0
+                logger.info(
+                    "Model registry refreshed plans=%d total_models=%d",
+                    len(per_plan_results),
+                    total_models,
+                )
+                get_account_selection_cache().invalidate()
         except Exception:
             logger.exception("Model registry refresh loop failed")
 
@@ -168,13 +304,34 @@ async def _fetch_with_failover(
     candidates: list[Account],
     encryptor: TokenEncryptor,
     accounts_repo: AccountsRepository,
+    *,
+    fetcher: Callable[..., Awaitable[list[UpstreamModel]]] | None = None,
+    auth_manager_factory: _AuthManagerFactory | None = None,
 ) -> _FetchResult | None:
+    """Iterate ``candidates`` and call the per-account fetcher.
+
+    ``fetcher`` defaults to :func:`fetch_models_for_plan` (the existing
+    Codex upstream path). The model refresh scheduler passes
+    :func:`fetch_claude_models` for Claude-provider accounts so a Claude
+    bearer is sent to ``{claude_api_base_url}/v1/models``, never to
+    ``/codex/models``.
+
+    ``auth_manager_factory`` resolves a provider-scoped auth manager —
+    the Codex factory (default) yields :class:`AuthManager`; the Claude
+    factory yields a :class:`_ClaudeAuthManagerAdapter`. Mixing a
+    Codex auth manager with a Claude account would attempt to refresh
+    using the wrong (placeholder) refresh-token column.
+    """
+    if fetcher is None:
+        fetcher = fetch_models_for_plan
+    if auth_manager_factory is None:
+        auth_manager_factory = _default_auth_manager_factory
     transport_recovery = _TransportRecoveryState()
     successful_results: list[list[UpstreamModel]] = []
     account_models: dict[str, tuple[str, list[UpstreamModel]]] = {}
 
     for account in candidates:
-        auth_manager = AuthManager(accounts_repo)
+        auth_manager = auth_manager_factory(accounts_repo)
         try:
             account = await _ensure_fresh_with_transport_recovery(
                 auth_manager,
@@ -185,6 +342,7 @@ async def _fetch_with_failover(
                 account,
                 encryptor,
                 transport_recovery=transport_recovery,
+                fetcher=fetcher,
             )
             successful_results.append(models)
             account_models[account.id] = (account.plan_type, models)
@@ -201,6 +359,7 @@ async def _fetch_with_failover(
                         account,
                         encryptor,
                         transport_recovery=transport_recovery,
+                        fetcher=fetcher,
                     )
                     successful_results.append(models)
                     account_models[account.id] = (account.plan_type, models)
@@ -265,7 +424,7 @@ def _merge_same_plan_model_results(successful_results: list[list[UpstreamModel]]
 
 
 async def _ensure_fresh_with_transport_recovery(
-    auth_manager: AuthManager,
+    auth_manager: _AuthManagerLike,
     account: Account,
     *,
     transport_recovery: _TransportRecoveryState,
@@ -287,17 +446,33 @@ async def _fetch_models_with_transport_recovery(
     encryptor: TokenEncryptor,
     *,
     transport_recovery: _TransportRecoveryState,
+    fetcher: Callable[..., Awaitable[list[UpstreamModel]]] | None = None,
 ) -> list[UpstreamModel]:
-    access_token = encryptor.decrypt(account.access_token_encrypted)
-    account_id = account.chatgpt_account_id
+    """Fetch models for one account, with one transport-error retry.
+
+    ``fetcher`` defaults to :func:`fetch_models_for_plan` (Codex).
+    The scheduler passes :func:`fetch_claude_models` for
+    ``Account.provider == 'claude'`` rows so the bearer is sent to the
+    right upstream — see ``openspec/changes/fix-model-refresh-scheduler-provider-scope``.
+
+    Bearer decryption is provider-scoped via :func:`_account_access_token`
+    so the Claude account's real access token is sent to Anthropic (NOT
+    the Codex-flavored ``encrypt('claude')`` placeholder). Auth-manager
+    selection happens upstream in :func:`_fetch_with_failover`.
+    """
+    if fetcher is None:
+        fetcher = fetch_models_for_plan
+    access_token = _account_access_token(encryptor, account)
+    fetcher_takes_account_id = fetcher is fetch_models_for_plan
     route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
 
     try:
-        return await fetch_models_for_plan(
+        return await _invoke_fetcher(
+            fetcher,
             access_token,
-            account_id,
+            account,
+            fetcher_takes_account_id=fetcher_takes_account_id,
             route=route,
-            allow_direct_egress=route is None,
         )
     except ModelFetchError as exc:
         if not exc.transport_error or transport_recovery.attempted:
@@ -305,15 +480,43 @@ async def _fetch_models_with_transport_recovery(
 
         await _refresh_http_client_after_transport_error(account, exc)
         transport_recovery.attempted = True
-        access_token = encryptor.decrypt(account.access_token_encrypted)
-        account_id = account.chatgpt_account_id
+        access_token = _account_access_token(encryptor, account)
         route = await _resolve_upstream_route_for_account(account, operation="model_discovery")
-        return await fetch_models_for_plan(
+        return await _invoke_fetcher(
+            fetcher,
             access_token,
-            account_id,
+            account,
+            fetcher_takes_account_id=fetcher_takes_account_id,
+            route=route,
+        )
+
+
+async def _invoke_fetcher(
+    fetcher: Callable[..., Awaitable[list[UpstreamModel]]],
+    access_token: str,
+    account: Account,
+    *,
+    fetcher_takes_account_id: bool,
+    route: ResolvedUpstreamRoute | None,
+) -> list[UpstreamModel]:
+    """Dispatch a fetcher call with the right per-provider positional shape.
+
+    Codex ``fetch_models_for_plan`` takes ``(access_token, account_id, *, ...)``;
+    Anthropic ``fetch_claude_models`` takes ``(access_token, *, ...)``. We
+    make the shape explicit (``fetcher_takes_account_id``) instead of
+    inspecting signatures: a single boolean survives refactors of either
+    fetcher, lets tests pass any callable for either provider, and avoids
+    using ``inspect.signature`` (which sees ``(*args, **kwargs)`` for
+    ``AsyncMock`` and would mis-classify every stand-in).
+    """
+    if fetcher_takes_account_id:
+        return await fetcher(
+            access_token,
+            account.chatgpt_account_id,
             route=route,
             allow_direct_egress=route is None,
         )
+    return await fetcher(access_token, route=route, allow_direct_egress=route is None)
 
 
 async def _resolve_upstream_route_for_account(account: Account, *, operation: str) -> ResolvedUpstreamRoute | None:
