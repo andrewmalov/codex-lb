@@ -273,12 +273,13 @@ describe("ApiKeyCreateDialog", () => {
   it("blocks submit when no provider is selected", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const onOpenChange = vi.fn();
 
     renderWithProviders(
       <ApiKeyCreateDialog
         open
         busy={false}
-        onOpenChange={vi.fn()}
+        onOpenChange={onOpenChange}
         onSubmit={onSubmit}
       />,
     );
@@ -290,6 +291,8 @@ describe("ApiKeyCreateDialog", () => {
       expect(screen.getByText("Choose a provider")).toBeInTheDocument();
     });
     expect(onSubmit).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: /create api key/i })).toBeInTheDocument();
   });
 
   it("payload includes providerScope=['codex'] when Codex is selected", async () => {
