@@ -96,6 +96,7 @@ describe("ApisPage", () => {
 		const nameInput = within(dialog).getByLabelText("Name");
 
 		await user.type(nameInput, "Broken key");
+		await user.click(within(dialog).getByRole("radio", { name: "Codex" }));
 		await user.click(within(dialog).getByRole("button", { name: "Create" }));
 
 		await waitFor(() => {
