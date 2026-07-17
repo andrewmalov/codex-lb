@@ -24,6 +24,24 @@ describe("ApiKeyCreateDialog", () => {
     expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).not.toBeChecked();
   });
 
+  it("renders the Provider radio with no default selection", () => {
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    const codex = screen.getByRole("radio", { name: "Codex" });
+    const claude = screen.getByRole("radio", { name: "Claude" });
+    expect(codex).not.toBeChecked();
+    expect(claude).not.toBeChecked();
+    // Mandatory marker is present (label has the asterisk).
+    expect(screen.getByText("Provider", { exact: false })).toBeInTheDocument();
+  });
+
   it("submits the codex /model checkbox value", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
@@ -38,6 +56,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Codex key");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("checkbox", { name: "Apply to codex /model" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
@@ -46,6 +65,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
   });
 
   it("submits opportunistic traffic class", async () => {
@@ -62,6 +82,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Opportunistic key");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("combobox", { name: /traffic class/i }));
     await user.click(await screen.findByRole("option", { name: /opportunistic/i }));
     await user.click(screen.getByRole("button", { name: "Create" }));
@@ -71,6 +92,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
   });
 
   it("renders and submits a transport policy override", async () => {
@@ -89,6 +111,7 @@ describe("ApiKeyCreateDialog", () => {
     expect(screen.getByRole("combobox", { name: "HTTP client routing" })).toHaveTextContent("Follow global default");
 
     await user.type(screen.getByLabelText("Name"), "Persistent sessions key");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("combobox", { name: "HTTP client routing" }));
     await user.click(await screen.findByRole("option", { name: "Prefer persistent sessions" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
@@ -98,6 +121,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].transportPolicyOverride).toBe("always_websocket");
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
   });
 
   it("resets the codex /model checkbox when the dialog is dismissed", async () => {
@@ -153,6 +177,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Scoped create");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => {
@@ -162,6 +187,7 @@ describe("ApiKeyCreateDialog", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Scoped create");
     expect("assignedAccountIds" in payload).toBe(false);
+    expect(payload.providerScope).toEqual(["codex"]);
   });
 
   it("submits selected assigned accounts on create", async () => {
@@ -192,6 +218,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Scoped create");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
@@ -204,6 +231,7 @@ describe("ApiKeyCreateDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.providerScope).toEqual(["codex"]);
   });
 
   it("clears selected assigned accounts when the dialog is dismissed", async () => {
@@ -240,5 +268,76 @@ describe("ApiKeyCreateDialog", () => {
 
     expect(await screen.findByRole("button", { name: "All accounts" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "1 account selected" })).not.toBeInTheDocument();
+  });
+
+  it("blocks submit when no provider is selected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+    const onOpenChange = vi.fn();
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={onOpenChange}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "No provider");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Choose a provider")).toBeInTheDocument();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onOpenChange).not.toHaveBeenCalled();
+    expect(screen.getByRole("dialog", { name: /create api key/i })).toBeInTheDocument();
+  });
+
+  it("payload includes providerScope=['codex'] when Codex is selected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Codex only");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
+  });
+
+  it("payload includes providerScope=['claude'] when Claude is selected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Claude only");
+    await user.click(screen.getByRole("radio", { name: "Claude" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["claude"]);
   });
 });

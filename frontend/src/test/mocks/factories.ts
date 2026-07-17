@@ -619,6 +619,7 @@ export function createApiKey(overrides: Partial<ApiKey> = {}): ApiKey {
 		isActive: true,
 		accountAssignmentScopeEnabled: false,
 		assignedAccountIds: [],
+		providerScope: ["codex"],
 		createdAt: offsetIso(-60),
 		lastUsedAt: offsetIso(-5),
 		usageSummary: {

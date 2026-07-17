@@ -125,6 +125,10 @@ function apiKeyEditDraftReducer(
   return { ...state, ...patch };
 }
 
+function providerScopeLabel(apiKey: ApiKey): "Codex" | "Claude" {
+  return apiKey.providerScope?.[0] === "claude" ? "Claude" : "Codex";
+}
+
 function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
@@ -190,6 +194,12 @@ function ApiKeyEditForm({ apiKey, busy, onSubmit, onClose }: ApiKeyEditFormProps
                 </FormItem>
               )}
             />
+
+            <div className="flex items-center gap-2 rounded-md border bg-muted/40 p-2 text-sm">
+              <span className="text-muted-foreground">Provider:</span>
+              <strong>{providerScopeLabel(apiKey)}</strong>
+              <span className="ml-auto text-xs text-muted-foreground">(immutable after creation)</span>
+            </div>
 
             <div className="space-y-1">
               <div className="text-sm font-medium">Allowed models</div>

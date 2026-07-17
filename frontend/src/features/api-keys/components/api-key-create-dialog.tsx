@@ -1,6 +1,6 @@
 import { useReducer } from "react";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { useForm } from "react-hook-form";
+import { Controller, useForm } from "react-hook-form";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
@@ -44,6 +44,9 @@ const TRANSPORT_POLICY_LABELS = {
 
 const formSchema = z.object({
   name: z.string().min(1, "Name is required"),
+  providerScope: z
+    .array(z.enum(["codex", "claude"]))
+    .length(1, "Choose a provider"),
 });
 
 type FormValues = z.infer<typeof formSchema>;
@@ -99,7 +102,8 @@ function apiKeyCreateDraftReducer(
 function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: { name: "" },
+    defaultValues: { name: "", providerScope: [] },
+    mode: "onSubmit",
   });
 
   const [draft, updateDraft] = useReducer(apiKeyCreateDraftReducer, initialApiKeyCreateDraft);
@@ -108,6 +112,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
     const validLimits = draft.limitRules.filter((rule) => rule.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
+      providerScope: values.providerScope,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
@@ -157,6 +162,45 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
             <div className="space-y-1">
               <p className="text-sm font-medium">Allowed models</p>
               <ModelMultiSelect value={draft.selectedModels} onChange={(selectedModels) => updateDraft({ selectedModels })} />
+            </div>
+
+            <div className="space-y-1">
+              <p className="text-sm font-medium">
+                Provider <span className="text-destructive">*</span>
+              </p>
+              <Controller
+                control={form.control}
+                name="providerScope"
+                render={({ field, fieldState }) => (
+                  <>
+                    <div className="flex gap-4">
+                      <label className="flex cursor-pointer items-center gap-2 rounded-md border p-2 text-sm">
+                        <input
+                          type="radio"
+                          name="create-api-key-provider"
+                          value="codex"
+                          checked={field.value[0] === "codex"}
+                          onChange={() => field.onChange(["codex"])}
+                        />
+                        <span>Codex</span>
+                      </label>
+                      <label className="flex cursor-pointer items-center gap-2 rounded-md border p-2 text-sm">
+                        <input
+                          type="radio"
+                          name="create-api-key-provider"
+                          value="claude"
+                          checked={field.value[0] === "claude"}
+                          onChange={() => field.onChange(["claude"])}
+                        />
+                        <span>Claude</span>
+                      </label>
+                    </div>
+                    {fieldState.error ? (
+                      <p className="text-xs text-destructive">{fieldState.error.message}</p>
+                    ) : null}
+                  </>
+                )}
+              />
             </div>
 
             <div className="flex items-center gap-2 rounded-md border p-2 text-sm">

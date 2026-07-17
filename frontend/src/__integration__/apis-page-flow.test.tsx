@@ -44,6 +44,7 @@ describe("apis page integration", () => {
 		await user.click(await screen.findByRole("button", { name: "Create API Key" }));
 		const createDialog = await screen.findByRole("dialog", { name: "Create API key" });
 		await user.type(within(createDialog).getByLabelText("Name"), "Created from APIs page");
+		await user.click(within(createDialog).getByRole("radio", { name: "Codex" }));
 		await user.click(within(createDialog).getByRole("button", { name: "Create" }));
 
 		const dialog = await screen.findByRole("dialog", { name: "API key created" });
@@ -106,6 +107,7 @@ describe("apis page integration", () => {
 		await user.click(await screen.findByRole("button", { name: "Create API Key" }));
 		const createDialog = await screen.findByRole("dialog", { name: "Create API key" });
 		await user.type(within(createDialog).getByLabelText("Name"), "Broken create");
+		await user.click(within(createDialog).getByRole("radio", { name: "Codex" }));
 		await user.click(within(createDialog).getByRole("button", { name: "Create" }));
 
 		expect(await screen.findByText("Invalid create payload")).toBeInTheDocument();

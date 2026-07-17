@@ -29,6 +29,7 @@ describe("api keys flow integration", () => {
     expect(createButton).toBeInTheDocument();
     await user.click(createButton);
     await user.type(screen.getByLabelText("Name"), createdName);
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     const createdDialog = await screen.findByRole("dialog", { name: "API key created" });
@@ -78,6 +79,7 @@ describe("api keys flow integration", () => {
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
     await user.keyboard("{Escape}");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     const createdDialog = await screen.findByRole("dialog", { name: "API key created" });
