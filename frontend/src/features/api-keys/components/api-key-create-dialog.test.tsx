@@ -269,4 +269,72 @@ describe("ApiKeyCreateDialog", () => {
     expect(await screen.findByRole("button", { name: "All accounts" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "1 account selected" })).not.toBeInTheDocument();
   });
+
+  it("blocks submit when no provider is selected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "No provider");
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(screen.getByText("Choose a provider")).toBeInTheDocument();
+    });
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it("payload includes providerScope=['codex'] when Codex is selected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Codex only");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
+  });
+
+  it("payload includes providerScope=['claude'] when Claude is selected", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    await user.type(screen.getByLabelText("Name"), "Claude only");
+    await user.click(screen.getByRole("radio", { name: "Claude" }));
+    await user.click(screen.getByRole("button", { name: "Create" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["claude"]);
+  });
 });
