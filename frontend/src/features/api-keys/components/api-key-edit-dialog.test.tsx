@@ -424,6 +424,53 @@ describe("ApiKeyEditDialog", () => {
     const trafficClassSelect = screen.getByRole("combobox", { name: /traffic class/i });
     expect(trafficClassSelect).toHaveTextContent("Opportunistic");
   });
+
+  it("displays the provider scope as a read-only badge", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ providerScope: ["claude"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    // The badge text is visible.
+    expect(screen.getByText(/Provider:/)).toBeInTheDocument();
+    expect(screen.getByText(/Claude/)).toBeInTheDocument();
+
+    // No radio control exists in the edit dialog.
+    expect(screen.queryByRole("radio", { name: "Codex" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("radio", { name: "Claude" })).not.toBeInTheDocument();
+  });
+
+  it("does not include providerScope in PATCH payload when saving", async () => {
+    const user = userEvent.setup();
+    const onSubmit = vi.fn().mockResolvedValue(undefined);
+
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ providerScope: ["claude"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={onSubmit}
+      />,
+    );
+
+    const nameInput = screen.getByLabelText("Name");
+    await user.clear(nameInput);
+    await user.type(nameInput, "Renamed claude key");
+    await user.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() => {
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+    });
+
+    const payload = onSubmit.mock.calls[0][0];
+    expect("providerScope" in payload).toBe(false);
+  });
 });
 
 describe("hasLimitRuleChanges", () => {
