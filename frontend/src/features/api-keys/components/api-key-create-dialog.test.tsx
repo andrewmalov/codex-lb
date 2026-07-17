@@ -24,6 +24,24 @@ describe("ApiKeyCreateDialog", () => {
     expect(screen.getByRole("checkbox", { name: "Apply to codex /model" })).not.toBeChecked();
   });
 
+  it("renders the Provider radio with no default selection", () => {
+    renderWithProviders(
+      <ApiKeyCreateDialog
+        open
+        busy={false}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    const codex = screen.getByRole("radio", { name: "Codex" });
+    const claude = screen.getByRole("radio", { name: "Claude" });
+    expect(codex).not.toBeChecked();
+    expect(claude).not.toBeChecked();
+    // Mandatory marker is present (label has the asterisk).
+    expect(screen.getByText("Provider", { exact: false })).toBeInTheDocument();
+  });
+
   it("submits the codex /model checkbox value", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);
