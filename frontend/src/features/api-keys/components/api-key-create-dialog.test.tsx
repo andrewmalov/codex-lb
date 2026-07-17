@@ -56,6 +56,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Codex key");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("checkbox", { name: "Apply to codex /model" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
@@ -64,6 +65,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].applyToCodexModel).toBe(true);
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
   });
 
   it("submits opportunistic traffic class", async () => {
@@ -80,6 +82,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Opportunistic key");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("combobox", { name: /traffic class/i }));
     await user.click(await screen.findByRole("option", { name: /opportunistic/i }));
     await user.click(screen.getByRole("button", { name: "Create" }));
@@ -89,6 +92,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].trafficClass).toBe("opportunistic");
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
   });
 
   it("renders and submits a transport policy override", async () => {
@@ -107,6 +111,7 @@ describe("ApiKeyCreateDialog", () => {
     expect(screen.getByRole("combobox", { name: "HTTP client routing" })).toHaveTextContent("Follow global default");
 
     await user.type(screen.getByLabelText("Name"), "Persistent sessions key");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("combobox", { name: "HTTP client routing" }));
     await user.click(await screen.findByRole("option", { name: "Prefer persistent sessions" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
@@ -116,6 +121,7 @@ describe("ApiKeyCreateDialog", () => {
     });
 
     expect(onSubmit.mock.calls[0][0].transportPolicyOverride).toBe("always_websocket");
+    expect(onSubmit.mock.calls[0][0].providerScope).toEqual(["codex"]);
   });
 
   it("resets the codex /model checkbox when the dialog is dismissed", async () => {
@@ -171,6 +177,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Scoped create");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(screen.getByRole("button", { name: "Create" }));
 
     await waitFor(() => {
@@ -180,6 +187,7 @@ describe("ApiKeyCreateDialog", () => {
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.name).toBe("Scoped create");
     expect("assignedAccountIds" in payload).toBe(false);
+    expect(payload.providerScope).toEqual(["codex"]);
   });
 
   it("submits selected assigned accounts on create", async () => {
@@ -210,6 +218,7 @@ describe("ApiKeyCreateDialog", () => {
     );
 
     await user.type(screen.getByLabelText("Name"), "Scoped create");
+    await user.click(screen.getByRole("radio", { name: "Codex" }));
     await user.click(await screen.findByRole("button", { name: "All accounts" }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /primary@example\.com/i }));
     await user.click(screen.getByRole("menuitemcheckbox", { name: /secondary@example\.com/i }));
@@ -222,6 +231,7 @@ describe("ApiKeyCreateDialog", () => {
 
     const payload = onSubmit.mock.calls[0][0];
     expect(payload.assignedAccountIds).toEqual(["acc_primary", "acc_secondary"]);
+    expect(payload.providerScope).toEqual(["codex"]);
   });
 
   it("clears selected assigned accounts when the dialog is dismissed", async () => {
