@@ -76,7 +76,6 @@ type ApiKeyCreateDraft = {
   trafficClass: TrafficClass;
   transportPolicyOverride: TransportPolicyOverride | null;
   applyToCodexModel: boolean;
-  providerScope: ("codex" | "claude")[];
 };
 
 const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
@@ -91,7 +90,6 @@ const initialApiKeyCreateDraft: ApiKeyCreateDraft = {
   trafficClass: "foreground",
   transportPolicyOverride: null,
   applyToCodexModel: false,
-  providerScope: [],
 };
 
 function apiKeyCreateDraftReducer(
@@ -114,7 +112,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
     const validLimits = draft.limitRules.filter((rule) => rule.maxValue > 0);
     const payload: ApiKeyCreateRequest = {
       name: values.name,
-      providerScope: draft.providerScope,
+      providerScope: values.providerScope,
       allowedModels: draft.selectedModels.length > 0 ? draft.selectedModels : undefined,
       applyToCodexModel: draft.applyToCodexModel,
       ...(draft.selectedAccountIds.length > 0 ? { assignedAccountIds: draft.selectedAccountIds } : {}),
@@ -182,10 +180,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                           name="create-api-key-provider"
                           value="codex"
                           checked={field.value[0] === "codex"}
-                          onChange={() => {
-                            updateDraft({ providerScope: ["codex"] });
-                            field.onChange(["codex"]);
-                          }}
+                          onChange={() => field.onChange(["codex"])}
                         />
                         <span>Codex</span>
                       </label>
@@ -195,10 +190,7 @@ function ApiKeyCreateForm({ busy, onClose, onSubmit }: ApiKeyCreateFormProps) {
                           name="create-api-key-provider"
                           value="claude"
                           checked={field.value[0] === "claude"}
-                          onChange={() => {
-                            updateDraft({ providerScope: ["claude"] });
-                            field.onChange(["claude"]);
-                          }}
+                          onChange={() => field.onChange(["claude"])}
                         />
                         <span>Claude</span>
                       </label>
