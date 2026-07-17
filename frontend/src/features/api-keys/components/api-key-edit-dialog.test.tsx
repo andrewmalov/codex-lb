@@ -445,6 +445,21 @@ describe("ApiKeyEditDialog", () => {
     expect(screen.queryByRole("radio", { name: "Claude" })).not.toBeInTheDocument();
   });
 
+  it("displays the Codex badge for codex-scoped keys", () => {
+    renderWithProviders(
+      <ApiKeyEditDialog
+        open
+        busy={false}
+        apiKey={createApiKey({ providerScope: ["codex"] })}
+        onOpenChange={vi.fn()}
+        onSubmit={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByText(/Provider:/)).toBeInTheDocument();
+    expect(screen.getByText(/Codex/)).toBeInTheDocument();
+  });
+
   it("does not include providerScope in PATCH payload when saving", async () => {
     const user = userEvent.setup();
     const onSubmit = vi.fn().mockResolvedValue(undefined);

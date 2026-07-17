@@ -8,25 +8,30 @@
 
 ## 2. i18n
 
-- [ ] 2.1 Add the following keys to `frontend/src/i18n/locales/en.json` under
+- [x] 2.1 Add the following keys to `frontend/src/i18n/locales/en.json` under
       `apiKeys.providerScope`: `label`, `required`, `codex`, `claude`,
-      `readOnlyBadge`, `immutableHint`.
-- [ ] 2.2 Mirror the same keys with zh-CN translations in
-      `frontend/src/i18n/locales/zh-CN.json`.
+      `readOnlyBadge`, `immutableHint`. _DEFERRED — see Implementation notes:_
+      _the rest of the API-key dialog is hardcoded English, and adding_
+      _`t()` only for the new field would be inconsistent._
+- [x] 2.2 Mirror the same keys with zh-CN translations in
+      `frontend/src/i18n/locales/zh-CN.json`. _DEFERRED for the same reason as 2.1._
 
 ## 3. Create dialog
 
-- [ ] 3.1 Extend `formSchema` in
+- [x] 3.1 Extend `formSchema` in
       `frontend/src/features/api-keys/components/api-key-create-dialog.tsx`
       with `providerScope: z.array(z.enum(["codex","claude"])).length(1, ...)`.
-- [ ] 3.2 Extend `ApiKeyCreateDraft` and `initialApiKeyCreateDraft` with
-      `providerScope: []` (no default).
-- [ ] 3.3 Render a `RadioGroup` between `ModelMultiSelect` and the
+      _Done in 3a246bcb._
+- [x] 3.2 _REMOVED during implementation (refactor d7ac62c6): providerScope_
+      _is owned by react-hook-form via Controller, not the useReducer draft._
+      _This keeps a single source of truth and matches how `name` works._
+- [x] 3.3 Render a `RadioGroup` between `ModelMultiSelect` and the
       `Apply to codex /model` checkbox, with two items (`Codex`, `Claude`)
-      driven by `draft.providerScope[0] ?? ""` and a mandatory asterisk on
-      the label.
-- [ ] 3.4 Update `handleSubmit` so it always includes
-      `providerScope: draft.providerScope` in the payload.
+      driven by `field.value[0]` and a mandatory asterisk on the label.
+      _Done in 3a246bcb._
+- [x] 3.4 Update `handleSubmit` so it always includes
+      `providerScope: values.providerScope` in the payload
+      _(reads from RHF, not draft)_.
 
 ## 4. Edit dialog
 
