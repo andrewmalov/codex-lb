@@ -799,3 +799,128 @@ async def test_refresh_account_requires_reauth_when_upstream_session_is_invalid(
     reason = repo.status_payload["deactivation_reason"]
     assert isinstance(reason, str)
     assert "re-login" in reason.lower() or "expired" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_defers_for_claude_provider(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: Codex ``AuthManager.refresh_account`` MUST NOT rotate
+    Claude rows.
+
+    A Claude row's Codex-flavored ``refresh_token_encrypted`` column
+    holds the literal placeholder ``"claude"`` (encrypted) — set by
+    ``ClaudeAuthManager.add_claude_account:279-281`` because the table
+    constraint ``ck_accounts_claude_rt_required`` only requires
+    ``claude_refresh_token_encrypted``. Decrypting that column and
+    posting it to the Codex OAuth endpoint returns
+    ``400 invalid_grant`` — which the existing failure branch surfaces
+    as a permanent failure and a ``status='reauth_required'`` flip.
+
+    Claude OAuth rotation is owned by
+    ``app.core.auth.guardian.AuthGuardianScheduler`` (via
+    ``ClaudeAuthManager.rotate_claude_access_token``). The Codex
+    ``AuthManager`` MUST short-circuit for Claude rows: do NOT call
+    ``refresh_access_token``, do NOT touch
+    ``AccountsRepositoryPort.update_status`` /
+    ``AccountsRepositoryPort.update_tokens``, do NOT mark the account
+    as routing-unavailable. The input ``Account`` is returned unchanged.
+
+    See ``openspec/changes/fix-auth-manager-claude-provider-defer``
+    for the 2026-07-17 incident on ``claude-test.bezproblem.vip`` where
+    the dashboard's first ``/usage-reset-credits`` poll after the OAuth
+    callback flipped the Claude account to ``reauth_required`` within
+    ~5 s.
+    """
+    refresh_called = False
+
+    async def _unexpected_refresh(*_args: object, **_kwargs: object) -> TokenRefreshResult:
+        nonlocal refresh_called
+        refresh_called = True
+        raise AssertionError(
+            "refresh_access_token must NOT be called for provider='claude' rows; "
+            "Claude rotation is owned by AuthGuardianScheduler."
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _unexpected_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="claude-491c2857-30eb-49ce-ad07-2b601efa041d",
+        email="user@example.test",
+        plan_type="claude_subscription",
+        provider="claude",
+        chatgpt_account_id=None,
+        claude_account_uuid="491c2857-30eb-49ce-ad07-2b601efa041d",
+        claude_user_email="user@example.test",
+        claude_user_organization_uuid=None,
+        # Codex-flavored columns hold the literal placeholder "claude" (encrypted).
+        access_token_encrypted=encryptor.encrypt("claude"),
+        refresh_token_encrypted=encryptor.encrypt("claude"),
+        id_token_encrypted=encryptor.encrypt("claude"),
+        # Real Claude credentials live here.
+        claude_access_token_encrypted=encryptor.encrypt("sk-ant-real-bearer"),
+        claude_refresh_token_encrypted=encryptor.encrypt("sk-ant-real-refresh"),
+        last_refresh=datetime(2026, 1, 1),
+        status=AccountStatus.ACTIVE,
+    )
+
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    # ``refresh_account`` is the API the scheduler and dashboard call.
+    # We exercise it directly; the singleflight and ``ensure_fresh``
+    # bookkeeping do not affect the bug path.
+    result = await manager.refresh_account(account)
+
+    # The account must be returned unchanged. No status flip, no token
+    # write, no upstream call.
+    assert result is account
+    assert result.status == AccountStatus.ACTIVE
+    assert repo.status_payload is None
+    assert repo.tokens_payload is None
+    assert refresh_called is False
+
+
+@pytest.mark.asyncio
+async def test_refresh_account_codex_path_still_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Companion regression: the short-circuit MUST NOT apply to Codex
+    rows. A Codex account with a real ``refresh_token_encrypted`` still
+    flows through the existing refresh + ``update_tokens`` path.
+    """
+    captured: dict[str, object] = {}
+
+    async def _fake_refresh(refresh_token: str, **_kwargs: object) -> TokenRefreshResult:
+        captured["refresh_token"] = refresh_token
+        return TokenRefreshResult(
+            access_token="new-access",
+            refresh_token="new-refresh",
+            id_token="new-id",
+            account_id=None,
+            plan_type="plus",
+            email=None,
+        )
+
+    monkeypatch.setattr(auth_manager_module, "refresh_access_token", _fake_refresh)
+
+    encryptor = TokenEncryptor()
+    account = Account(
+        id="acc_codex_regression",
+        email="user@example.com",
+        plan_type="plus",
+        provider="codex",  # explicit — guards against an over-correction
+        access_token_encrypted=encryptor.encrypt("access-old"),
+        refresh_token_encrypted=encryptor.encrypt("refresh-old-real"),
+        id_token_encrypted=encryptor.encrypt("id-old"),
+        last_refresh=utcnow(),
+        status=AccountStatus.ACTIVE,
+    )
+
+    repo = _DummyRepo()
+    manager = AuthManager(cast(AccountsRepositoryPort, repo))
+
+    updated = await manager.refresh_account(account)
+
+    # Codex path still runs end-to-end.
+    assert captured.get("refresh_token") == "refresh-old-real"
+    assert repo.tokens_payload is not None
+    assert repo.tokens_payload["account_id"] == "acc_codex_regression"
+    assert updated.status == AccountStatus.ACTIVE

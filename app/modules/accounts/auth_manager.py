@@ -204,6 +204,27 @@ class AuthManager:
             return await owned.refresh_account(account)
 
     async def refresh_account(self, account: Account) -> Account:
+        if getattr(account, "provider", None) == "claude":
+            # Claude OAuth rotation is owned by
+            # ``app.core.auth.guardian.AuthGuardianScheduler`` (via
+            # ``ClaudeAuthManager.rotate_claude_access_token``). The Codex
+            # ``AuthManager`` MUST NOT rotate Claude rows: the
+            # Codex-flavored ``refresh_token_encrypted`` column holds the
+            # literal placeholder ``"claude"`` (encrypted) — set by
+            # ``ClaudeAuthManager.add_claude_account:279-281`` because the
+            # table constraint ``ck_accounts_claude_rt_required`` only
+            # requires ``claude_refresh_token_encrypted``. Decrypting that
+            # placeholder and posting it to the Codex OAuth endpoint
+            # returns ``400 invalid_grant``, which the failure branch
+            # below would surface as a permanent failure and flip the
+            # account to ``status='reauth_required'`` within ~5 s of the
+            # dashboard's first ``/usage-reset-credits`` poll (see
+            # ``openspec/changes/fix-auth-manager-claude-provider-defer``
+            # and the 2026-07-17 trace on
+            # ``claude-test.bezproblem.vip``). Mirror the rationale from
+            # PR #30's ``_ClaudeAuthManagerAdapter`` in
+            # ``app/core/openai/model_refresh_scheduler.py``.
+            return account
         refresh_token = self._encryptor.decrypt(account.refresh_token_encrypted)
         try:
             result = await self._refresh_tokens(refresh_token, account=account)
