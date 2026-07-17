@@ -414,9 +414,7 @@ async def test_fetch_with_failover_uses_injected_fetcher(monkeypatch: pytest.Mon
     claude_account = _claude_account("claude-1")
     claude_models = [_model("claude-opus-4-20250514")]
 
-    codex_fetcher = AsyncMock(
-        side_effect=AssertionError("Codex fetcher MUST NOT be called for Claude accounts")
-    )
+    codex_fetcher = AsyncMock(side_effect=AssertionError("Codex fetcher MUST NOT be called for Claude accounts"))
     claude_fetcher = AsyncMock(return_value=claude_models)
 
     monkeypatch.setattr(scheduler_module, "AuthManager", _StubAuthManager)
@@ -439,6 +437,7 @@ async def test_fetch_with_failover_uses_injected_fetcher(monkeypatch: pytest.Mon
     # The Claude fetcher MUST receive the real Claude bearer
     # (``sk-ant-real-bearer``); a bug that decrypts the Codex-flavored
     # placeholder column would surface as ``"claude"`` here.
+    assert claude_fetcher.await_args is not None
     claude_args, _ = claude_fetcher.await_args
     assert claude_args == ("sk-ant-real-bearer",)
 
@@ -463,9 +462,7 @@ async def test_fetch_with_failover_uses_claude_auth_manager_for_claude_accounts(
     claude_fetcher = AsyncMock(return_value=claude_models)
 
     codex_constructor = MagicMock(
-        side_effect=AssertionError(
-            "Codex AuthManager MUST NOT be constructed for Claude accounts"
-        )
+        side_effect=AssertionError("Codex AuthManager MUST NOT be constructed for Claude accounts")
     )
     monkeypatch.setattr(scheduler_module, "AuthManager", codex_constructor)
     monkeypatch.setattr(scheduler_module, "fetch_models_for_plan", codex_constructor)
@@ -560,6 +557,7 @@ async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
     codex_fetcher.assert_awaited_once()
     claude_fetcher.assert_awaited_once()
     # Each fetcher was called with its own account only.
+    assert codex_fetcher.await_args is not None
     codex_call_args, codex_call_kwargs = codex_fetcher.await_args
     assert codex_call_args == ("sk-ant-oat01-AT", codex_account.chatgpt_account_id)
     # The Codex dispatcher passes ``allow_direct_egress=True`` when no
@@ -568,6 +566,7 @@ async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
     # The Claude fetcher receives ONLY a positional ``access_token``;
     # ``account_id`` was dropped from ``fetch_claude_models`` because
     # Anthropic rejects ``chatgpt-account-id`` headers outright.
+    assert claude_fetcher.await_args is not None
     claude_call_args, _claude_call_kwargs = claude_fetcher.await_args
     assert claude_call_args == ("sk-ant-real-bearer",)
     # Codex fetcher MUST NOT have seen the Claude bearer.
@@ -576,15 +575,17 @@ async def test_refresh_once_calls_only_codex_fetcher_for_codex_accounts(
 
     registry.update.assert_awaited_once()
     call = registry.update.await_args
+    assert call is not None
     args = call.args
     kwargs = call.kwargs
     per_plan_results = kwargs.get("per_plan_results") if "per_plan_results" in kwargs else (args[0] if args else None)
-    active_account_plans = kwargs.get("active_account_plans") if "active_account_plans" in kwargs else (
-        args[1] if len(args) > 1 else None
+    active_account_plans = (
+        kwargs.get("active_account_plans") if "active_account_plans" in kwargs else (args[1] if len(args) > 1 else None)
     )
     assert per_plan_results is not None, f"registry.update called with args={args} kwargs={kwargs}"
     assert "gpt-5.4" in per_plan_results["team"][0].slug
     assert "claude-opus-4-20250514" in per_plan_results["claude_subscription"][0].slug
+    assert active_account_plans is not None
     assert active_account_plans[codex_account.id] == "team"
     assert active_account_plans[claude_account.id] == "claude_subscription"
 
@@ -593,9 +594,7 @@ async def test_refresh_once_skips_provider_with_no_accounts(monkeypatch: pytest.
     """If a provider has no accounts, its fetcher MUST NOT be called —
     no surprise network traffic for empty partitions.
     """
-    codex_fetcher = AsyncMock(
-        side_effect=AssertionError("Codex fetcher MUST NOT be called when there are no accounts")
-    )
+    codex_fetcher = AsyncMock(side_effect=AssertionError("Codex fetcher MUST NOT be called when there are no accounts"))
     claude_fetcher = AsyncMock(
         side_effect=AssertionError("Claude fetcher MUST NOT be called when there are no accounts")
     )

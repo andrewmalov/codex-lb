@@ -142,6 +142,7 @@ def _build_claude_auth_manager_factory(encryptor: TokenEncryptor) -> _AuthManage
     Returning a factory (rather than a singleton adapter) matches the
     Codex path and keeps session ownership at the scheduler boundary.
     """
+
     def _factory(repo: AccountsRepository) -> _AuthManagerLike:
         return cast(_AuthManagerLike, _ClaudeAuthManagerAdapter(repo, encryptor=encryptor))
 

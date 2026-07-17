@@ -197,6 +197,7 @@ async def test_fetch_claude_models_happy_path(monkeypatch: pytest.MonkeyPatch) -
     # No chatgpt-account-id header is sent to Anthropic
     assert "chatgpt-account-id" not in (session.last_headers or {})
     # anthropic-version IS sent (Anthropic requires it)
+    assert session.last_headers is not None
     assert session.last_headers["anthropic-version"] == "2023-06-01"
     # Authorization Bearer is set
     assert session.last_headers["Authorization"] == "Bearer sk-ant-oat01-AT"
